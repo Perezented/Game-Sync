@@ -8,10 +8,12 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QFileDialog, QLabel, QLineEdit, QComboBox, QProgressBar, QStyle, QSizePolicy,
-    QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QFrame, QScrollArea
+    QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QFrame, QScrollArea,
+    QInputDialog
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
+import shlex
 import json
 import platform
 import webbrowser
@@ -33,6 +35,12 @@ try:
     DROPBOX_AVAILABLE = True
 except ImportError:
     DROPBOX_AVAILABLE = False
+
+try:
+    import paramiko
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    PARAMIKO_AVAILABLE = False
 
 
 class NetworkScanner(QThread):
@@ -392,12 +400,13 @@ class LocalNetworkSync:
     """Push/pull saves to/from any SSH-accessible machine on the LAN (e.g. a Pi)."""
 
     def __init__(self, ip: str, username: str, remote_base: str,
-                 ssh_port: int = 22, ssh_key: str = ""):
-        self.ip          = ip
-        self.username    = username
-        self.remote_base = remote_base.rstrip("/")
-        self.ssh_port    = ssh_port
-        self.ssh_key     = ssh_key  # path to private key, optional
+                 ssh_port: int = 22, ssh_key: str = "", ssh_password: str = ""):
+        self.ip           = ip
+        self.username     = username
+        self.remote_base  = remote_base.rstrip("/")
+        self.ssh_port     = ssh_port
+        self.ssh_key      = ssh_key  # path to private key, optional
+        self.ssh_password = ssh_password
 
     def is_authenticated(self) -> bool:
         return bool(self.ip and self.username)
@@ -409,13 +418,44 @@ class LocalNetworkSync:
             opts += ["-i", self.ssh_key]
         return opts
 
+    def _has_sshpass(self) -> bool:
+        return subprocess.run(["which", "sshpass"], capture_output=True).returncode == 0
+
+    def _with_password(self, cmd: list[str]) -> list[str]:
+        if self.ssh_password:
+            if not self._has_sshpass():
+                raise RuntimeError(
+                    "sshpass is required for password authentication. "
+                    "Install sshpass or use an SSH key."
+                )
+            return ["sshpass", "-p", self.ssh_password] + cmd
+        return cmd
+
     def _remote_addr(self, subpath: str = "") -> str:
         return f"{self.username}@{self.ip}:{self.remote_base}/{subpath.lstrip('/')}"
 
     def test_connection(self) -> tuple[bool, str]:
-        cmd = ["ssh"] + self._ssh_opts() + [
+        if self.ssh_password and PARAMIKO_AVAILABLE:
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=self.ip,
+                    port=self.ssh_port,
+                    username=self.username,
+                    password=self.ssh_password,
+                    look_for_keys=False,
+                    allow_agent=False,
+                    timeout=8,
+                )
+                client.close()
+                return True, "Connection successful."
+            except Exception as exc:
+                return False, str(exc)
+
+        cmd = self._with_password(["ssh"] + self._ssh_opts() + [
             f"{self.username}@{self.ip}", "echo OK"
-        ]
+        ])
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
             if result.returncode == 0:
@@ -424,14 +464,88 @@ class LocalNetworkSync:
         except Exception as exc:
             return False, str(exc)
 
+    # ── paramiko SFTP helpers ──────────────────────────────────────────────────
+
+    def _sftp_client(self):
+        """Return a connected (SSHClient, SFTPClient) pair using the stored password."""
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=self.ip,
+            port=self.ssh_port,
+            username=self.username,
+            password=self.ssh_password,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=10,
+        )
+        return client, client.open_sftp()
+
+    def _sftp_mkdir_p(self, sftp, remote_dir: str):
+        """Recursively create remote directories via SFTP."""
+        parts = remote_dir.replace("\\", "/").split("/")
+        path  = ""
+        for part in parts:
+            if not part:
+                path = "/"
+                continue
+            path = f"{path}/{part}" if path and path != "/" else f"/{part}" if path == "/" else part
+            try:
+                sftp.stat(path)
+            except FileNotFoundError:
+                sftp.mkdir(path)
+
+    def _sftp_put_recursive(self, sftp, local: Path, remote: str):
+        """Upload local file or directory tree to remote path via SFTP."""
+        self._sftp_mkdir_p(sftp, remote)
+        if local.is_file():
+            sftp.put(str(local), f"{remote}/{local.name}")
+        else:
+            for item in local.iterdir():
+                r_sub = f"{remote}/{item.name}"
+                if item.is_dir():
+                    self._sftp_mkdir_p(sftp, r_sub)
+                    self._sftp_put_recursive(sftp, item, r_sub)
+                else:
+                    sftp.put(str(item), r_sub)
+
+    def _sftp_get_recursive(self, sftp, remote: str, local: Path):
+        """Download remote directory tree to local path via SFTP."""
+        local.mkdir(parents=True, exist_ok=True)
+        for entry in sftp.listdir_attr(remote):
+            r_path = f"{remote}/{entry.filename}"
+            l_path = local / entry.filename
+            import stat
+            if stat.S_ISDIR(entry.st_mode):
+                self._sftp_get_recursive(sftp, r_path, l_path)
+            else:
+                sftp.get(r_path, str(l_path))
+
+    # ── public transfer methods ────────────────────────────────────────────────
+
     def upload(self, local_path: str | Path, cloud_folder: str):
-        lp    = Path(local_path)
+        lp = Path(local_path)
+        if self.ssh_password:
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError(
+                    "paramiko is required for password-based SSH transfers. "
+                    "Run: pip install paramiko"
+                )
+            client, sftp = self._sftp_client()
+            try:
+                remote = f"{self.remote_base}/{cloud_folder.lstrip('/')}"
+                self._sftp_put_recursive(sftp, lp, remote)
+            finally:
+                sftp.close()
+                client.close()
+            return
+
+        # Key-based auth: rsync preferred, scp fallback
         dest  = self._remote_addr(cloud_folder)
-        # rsync preferred; fall back to scp -r
         rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
         if rsync:
-            cmd = ["rsync", "-az", "--mkpath",
-                   "-e", "ssh " + " ".join(self._ssh_opts()),
+            ssh_cmd = "ssh " + " ".join(self._ssh_opts())
+            cmd = ["rsync", "-az", "--mkpath", "-e", ssh_cmd,
                    str(lp) + ("/" if lp.is_dir() else ""),
                    dest]
         else:
@@ -441,15 +555,29 @@ class LocalNetworkSync:
             raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
 
     def download(self, cloud_folder: str, local_path: str | Path):
-        lp   = Path(local_path)
+        lp = Path(local_path)
+        if self.ssh_password:
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError(
+                    "paramiko is required for password-based SSH transfers. "
+                    "Run: pip install paramiko"
+                )
+            client, sftp = self._sftp_client()
+            try:
+                remote = f"{self.remote_base}/{cloud_folder.lstrip('/')}"
+                self._sftp_get_recursive(sftp, remote, lp)
+            finally:
+                sftp.close()
+                client.close()
+            return
+
+        # Key-based auth: rsync preferred, scp fallback
         lp.mkdir(parents=True, exist_ok=True)
-        src  = self._remote_addr(cloud_folder)
+        src   = self._remote_addr(cloud_folder)
         rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
         if rsync:
-            cmd = ["rsync", "-az",
-                   "-e", "ssh " + " ".join(self._ssh_opts()),
-                   src + "/",
-                   str(lp)]
+            ssh_cmd = "ssh " + " ".join(self._ssh_opts())
+            cmd = ["rsync", "-az", "-e", ssh_cmd, src + "/", str(lp)]
         else:
             cmd = ["scp"] + self._ssh_opts() + ["-r", src, str(lp)]
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -503,6 +631,7 @@ class SyncApp(QMainWindow):
         self.gdrive_sync:       GoogleDriveSync    | None = None
         self.dropbox_sync:      DropboxSync        | None = None
         self.local_network_sync: LocalNetworkSync  | None = None
+        self.lm_password:       str               = ""
         self.cloud_worker:      CloudWorkerThread  | None = None
 
     # ── Window helpers ────────────────────────────────────────────────────────
@@ -601,12 +730,16 @@ class SyncApp(QMainWindow):
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def init_ui(self):
-        widget = QWidget()
-        main_layout = QVBoxLayout()
+        outer_widget = QWidget()
+        outer_layout = QVBoxLayout(outer_widget)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        # ── Title Header ──────────────────────────────────────────────────────
-        header_layout = QHBoxLayout()
-        header_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header_widget = QWidget()
+        header_widget.setStyleSheet("background-color: #2d2d2d; border-bottom: 1px solid #444;")
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(10, 10, 10, 10)
+        header_layout.setSpacing(8)
         header_layout.addStretch(1)
 
         header_label = QLabel("Game Sync Tool")
@@ -633,27 +766,32 @@ class SyncApp(QMainWindow):
         window_control_layout.addWidget(close_button)
 
         header_layout.addLayout(window_control_layout)
-        main_layout.addLayout(header_layout)
+        outer_layout.addWidget(header_widget)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        content_layout.setSpacing(10)
 
         description_label = QLabel("Select your game, choose the destination machine, and start syncing your game files effortlessly.")
         description_label.setStyleSheet("font-size: 12px; color: gray;")
-        main_layout.addWidget(description_label, alignment=Qt.AlignmentFlag.AlignCenter)
-
+        content_layout.addWidget(description_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        
         # ── Local machine info ────────────────────────────────────────────────
         self.local_os_label = QLabel(f"Local machine OS: {self.local_os}")
         self.local_os_label.setStyleSheet("font-size: 11px; color: lightblue;")
-        main_layout.addWidget(self.local_os_label)
+        content_layout.addWidget(self.local_os_label)
 
         # ── Game Selection ────────────────────────────────────────────────────
         self.select_game_label = QLabel("Select Game:")
-        main_layout.addWidget(self.select_game_label)
+        content_layout.addWidget(self.select_game_label)
 
         self.game_dropdown = QComboBox()
-        main_layout.addWidget(self.game_dropdown)
+        content_layout.addWidget(self.game_dropdown)
 
         # ── Network Scan / Destination Machine ───────────────────────────────
         dest_machine_label = QLabel("Destination Machine (Network Scan):")
-        main_layout.addWidget(dest_machine_label)
+        content_layout.addWidget(dest_machine_label)
 
         scan_row = QHBoxLayout()
 
@@ -668,22 +806,22 @@ class SyncApp(QMainWindow):
         self.scan_button.clicked.connect(self.start_network_scan)
         scan_row.addWidget(self.scan_button)
 
-        main_layout.addLayout(scan_row)
+        content_layout.addLayout(scan_row)
 
         self.scan_status_label = QLabel("")
         self.scan_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
-        main_layout.addWidget(self.scan_status_label)
+        content_layout.addWidget(self.scan_status_label)
 
         self.scan_progress = QProgressBar()
         self.scan_progress.setRange(0, 0)
         self.scan_progress.setVisible(False)
         self.scan_progress.setFixedHeight(12)
         self.scan_progress.setTextVisible(False)
-        main_layout.addWidget(self.scan_progress)
+        content_layout.addWidget(self.scan_progress)
 
         # ── Sync Direction ────────────────────────────────────────────────────
         self.sync_direction_label = QLabel("Sync Direction:")
-        main_layout.addWidget(self.sync_direction_label)
+        content_layout.addWidget(self.sync_direction_label)
 
         self.sync_direction_dropdown = QComboBox()
         self.sync_direction_dropdown.addItems([
@@ -692,13 +830,13 @@ class SyncApp(QMainWindow):
             "Windows ↔ Linux",
             "Windows ↔ Windows",
         ])
-        main_layout.addWidget(self.sync_direction_dropdown)
+        content_layout.addWidget(self.sync_direction_dropdown)
 
         # ── Cloud Storage accordion ───────────────────────────────────────────
         self.cloud_enabled_checkbox = QCheckBox("Enable Cloud Storage (middle-man sync)")
         self.cloud_enabled_checkbox.setStyleSheet("font-size: 11px; color: #9fd3ff; font-weight: bold;")
         self.cloud_enabled_checkbox.toggled.connect(self.toggle_cloud_section)
-        main_layout.addWidget(self.cloud_enabled_checkbox)
+        content_layout.addWidget(self.cloud_enabled_checkbox)
 
         self.cloud_section = QGroupBox("Cloud Sync Settings")
         self.cloud_section.setVisible(False)
@@ -921,21 +1059,21 @@ class SyncApp(QMainWindow):
         cloud_layout.addLayout(cf_row)
 
         self.cloud_section.setLayout(cloud_layout)
-        main_layout.addWidget(self.cloud_section)
+        content_layout.addWidget(self.cloud_section)
 
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
-        main_layout.addWidget(self.source_label)
+        content_layout.addWidget(self.source_label)
 
         self.source_path = QLineEdit()
-        main_layout.addWidget(self.source_path)
+        content_layout.addWidget(self.source_path)
 
         # ── Destination Path ──────────────────────────────────────────────────
         self.dest_label = QLabel("Destination Path (remote machine):")
-        main_layout.addWidget(self.dest_label)
+        content_layout.addWidget(self.dest_label)
 
         self.dest_path = QLineEdit()
-        main_layout.addWidget(self.dest_path)
+        content_layout.addWidget(self.dest_path)
 
         # ── Sync Button ───────────────────────────────────────────────────────
         self.sync_button = QPushButton("Start Sync")
@@ -959,28 +1097,28 @@ class SyncApp(QMainWindow):
         warning_label.setStyleSheet("font-size: 10px; color: orange;")
         warning_label.setWordWrap(False)
         warning_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
-        main_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        content_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         sync_btn_row = QHBoxLayout()
         sync_btn_row.addWidget(self.sync_button)
         sync_btn_row.addWidget(self.push_cloud_btn)
         sync_btn_row.addWidget(self.pull_cloud_btn)
-        main_layout.addLayout(sync_btn_row)
-        main_layout.addWidget(self.cloud_op_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        content_layout.addLayout(sync_btn_row)
+        content_layout.addWidget(self.cloud_op_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        content_layout.addWidget(self.progress_bar)
 
-        widget.setLayout(main_layout)
+        content_widget.setLayout(content_layout)
 
         # ── Scroll wrapper ────────────────────────────────────────────────────
-        widget.setStyleSheet("background-color: #353535; color: white;")
-        widget.setAutoFillBackground(True)
+        content_widget.setStyleSheet("background-color: #353535; color: white;")
+        content_widget.setAutoFillBackground(True)
 
         scroll_area = QScrollArea()
-        scroll_area.setWidget(widget)
+        scroll_area.setWidget(content_widget)
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -988,7 +1126,8 @@ class SyncApp(QMainWindow):
             "QScrollArea { background-color: #353535; border: none; }"
             "QWidget { background-color: transparent; }"
         )
-        self.setCentralWidget(scroll_area)
+        outer_layout.addWidget(scroll_area)
+        self.setCentralWidget(outer_widget)
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
 
@@ -1282,6 +1421,18 @@ class SyncApp(QMainWindow):
         if path:
             self.lm_ssh_key_input.setText(path)
 
+    def _request_local_machine_password(self) -> str | None:
+        password, ok = QInputDialog.getText(
+            self,
+            "SSH Password",
+            "Enter the SSH password for the selected local machine:",
+            QLineEdit.EchoMode.Password,
+        )
+        if ok and password:
+            self.lm_password = password
+            return password
+        return None
+
     def _build_local_network_sync(self) -> bool:
         """Create a LocalNetworkSync from the current UI fields. Returns True if valid."""
         ip       = self.previous_paths.get("lm_ip", "")
@@ -1306,7 +1457,8 @@ class SyncApp(QMainWindow):
         if not ip or not username or not rpath:
             return False
 
-        self.local_network_sync = LocalNetworkSync(ip, username, rpath, port, key)
+        password = getattr(self, "lm_password", "")
+        self.local_network_sync = LocalNetworkSync(ip, username, rpath, port, key, password)
         return True
 
     def _test_local_machine_connection(self):
@@ -1314,6 +1466,14 @@ class SyncApp(QMainWindow):
             self.lm_status_label.setText("Fill in Machine, Username, and Remote Path first.")
             self.lm_status_label.setStyleSheet("font-size: 10px; color: orange;")
             return
+
+        if not self.local_network_sync.ssh_key and not self.local_network_sync.ssh_password:
+            password = self._request_local_machine_password()
+            if not password:
+                self.lm_status_label.setText("SSH password required or provide an SSH key.")
+                self.lm_status_label.setStyleSheet("font-size: 10px; color: orange;")
+                return
+            self.local_network_sync.ssh_password = password
 
         self.lm_test_btn.setEnabled(False)
         self.lm_status_label.setText("Testing…")
