@@ -1,0 +1,19 @@
+{
+  "sync_entries": [
+    {
+      "name": "Windows to Linux (Zomboid)",
+      "source": "%USERPROFILE%\\Zomboid\\Saves",
+      "destination": "~/.Zomboid/Saves"
+    },
+    {
+      "name": "Linux to Windows (Zomboid)",
+      "source": "~/.Zomboid/Saves",
+      "destination": "%USERPROFILE%\\Zomboid\\Saves"
+    },
+    {
+      "name": "Linux to Linux Backup",
+      "source": "~/.Zomboid/Saves",
+      "destination": "~/zomboid_backups/linux_saves"
+    }
+  ]
+}
