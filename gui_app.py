@@ -583,7 +583,20 @@ class SyncApp(QMainWindow):
         palette.setColor(QPalette.ColorRole.Text,        Qt.GlobalColor.white)
         palette.setColor(QPalette.ColorRole.Button,      QColor(53, 53, 53))
         palette.setColor(QPalette.ColorRole.ButtonText,  Qt.GlobalColor.white)
+        palette.setColor(QPalette.ColorRole.Highlight,   QColor(87, 134, 193))
+        palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.white)
         self.setPalette(palette)
+        self.setStyleSheet(
+            "QWidget { background-color: #353535; color: white; }"
+            "QLineEdit, QComboBox, QPlainTextEdit, QTextEdit, QSpinBox, QGroupBox, QRadioButton, QCheckBox {"
+            " background-color: #3f3f3f; color: white; border: 1px solid #555; }"
+            "QPushButton { background-color: #444; color: white; border: 1px solid #555; }"
+            "QPushButton:hover { background-color: #5a5a5a; }"
+            "QLabel { color: white; }"
+            "QScrollBar:vertical { background: #2b2b2b; width: 10px; }"
+            "QScrollBar::handle:vertical { background: #626262; border-radius: 5px; }"
+            "QScrollBar::handle:vertical:hover { background: #7a7a7a; }"
+        )
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
@@ -963,12 +976,18 @@ class SyncApp(QMainWindow):
         widget.setLayout(main_layout)
 
         # ── Scroll wrapper ────────────────────────────────────────────────────
+        widget.setStyleSheet("background-color: #353535; color: white;")
+        widget.setAutoFillBackground(True)
+
         scroll_area = QScrollArea()
         scroll_area.setWidget(widget)
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setStyleSheet("QScrollArea { border: none; }")
+        scroll_area.setStyleSheet(
+            "QScrollArea { background-color: #353535; border: none; }"
+            "QWidget { background-color: transparent; }"
+        )
         self.setCentralWidget(scroll_area)
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
