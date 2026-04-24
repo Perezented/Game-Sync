@@ -129,9 +129,10 @@ class SyncApp(QMainWindow):
         self._apply_local_os_source_path()
 
         self.scan_active = False
+        self.sync_active = False
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(60_000)
-        self.scan_timer.timeout.connect(self.start_network_scan)
+        self.scan_timer.timeout.connect(self.on_scan_timer_timeout)
         self.scan_timer.start()
         self.start_network_scan()
 
@@ -348,6 +349,11 @@ class SyncApp(QMainWindow):
 
     # ── Network scan ──────────────────────────────────────────────────────────
 
+    def on_scan_timer_timeout(self):
+        if self.sync_active:
+            return
+        self.start_network_scan()
+
     def start_network_scan(self):
         if self.scan_active:
             return
@@ -518,10 +524,12 @@ class SyncApp(QMainWindow):
         source      = self.source_path.text()
         destination = self.dest_path.text()
         print(f"Syncing from {source} to {destination}")
+        self.sync_active = True
         self.save_settings()
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(50)
         self.progress_bar.setValue(100)
+        self.sync_active = False
 
 
 if __name__ == "__main__":
