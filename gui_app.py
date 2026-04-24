@@ -453,9 +453,12 @@ class LocalNetworkSync:
             except Exception as exc:
                 return False, str(exc)
 
-        cmd = self._with_password(["ssh"] + self._ssh_opts() + [
-            f"{self.username}@{self.ip}", "echo OK"
-        ])
+        try:
+            cmd = self._with_password(["ssh"] + self._ssh_opts() + [
+                f"{self.username}@{self.ip}", "echo OK"
+            ])
+        except Exception as exc:
+            return False, str(exc)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
             if result.returncode == 0:
@@ -602,6 +605,11 @@ class SyncApp(QMainWindow):
         self._current_dest_ip  = ""   # IP  of currently-selected destination
         self.local_os       = "Linux" if platform.system() != "Windows" else "Windows"
         self.local_interfaces, self.local_ips, self.local_macs = self._get_local_network_identity()
+
+        self.scan_active = False
+        self.sync_active = False
+        self.scan_performed = False
+        self._loading   = False
 
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -963,6 +971,13 @@ class SyncApp(QMainWindow):
         lm_host_row.addWidget(self.lm_host_dropdown)
         lm_layout.addLayout(lm_host_row)
 
+        self.lm_scan_progress = QProgressBar()
+        self.lm_scan_progress.setRange(0, 0)
+        self.lm_scan_progress.setVisible(False)
+        self.lm_scan_progress.setFixedHeight(12)
+        self.lm_scan_progress.setTextVisible(False)
+        lm_layout.addWidget(self.lm_scan_progress)
+
         lm_user_row = QHBoxLayout()
         lm_user_label = QLabel("Username:")
         lm_user_label.setFixedWidth(80)
@@ -1184,6 +1199,9 @@ class SyncApp(QMainWindow):
             "(sub-folder appended to remote path above, e.g. Zomboid)"
         )
         self.cloud_folder_row.setVisible(not is_local)
+        if btn_id == 3 and self.lm_host_dropdown.count() <= 1 and not getattr(self, 'scan_active', False):
+            self.start_network_scan()
+        self._refresh_local_machine_scan_state()
 
     def on_gd_auth_method_changed(self, btn_id: int, checked: bool):
         if not checked:
@@ -1195,6 +1213,11 @@ class SyncApp(QMainWindow):
         if not self.cloud_folder_input.text():
             game = self.game_dropdown.currentText() or "Game"
             self.cloud_folder_input.setText(f"/GameSync/{game}/")
+
+    def _refresh_local_machine_scan_state(self):
+        has_hosts = self.lm_host_dropdown.count() > 1
+        self.lm_host_dropdown.setEnabled(has_hosts)
+        self.lm_scan_progress.setVisible(self.scan_active and self.local_machine_section.isVisible())
 
     # ── Google Drive auth ─────────────────────────────────────────────────────
 
@@ -1423,6 +1446,7 @@ class SyncApp(QMainWindow):
                 self.lm_host_dropdown.setCurrentIndex(idx)
 
         self.lm_host_dropdown.blockSignals(False)
+        self._refresh_local_machine_scan_state()
 
     def _on_lm_host_selected(self, index: int):
         if index <= 0:
@@ -1506,17 +1530,22 @@ class SyncApp(QMainWindow):
         self.lm_test_btn.setEnabled(False)
         self.lm_status_label.setText("Testing…")
         self.lm_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        self.lm_scan_progress.setVisible(True)
 
         import threading  # noqa: PLC0415
         obj = self.local_network_sync
         def _run():
-            ok, msg = obj.test_connection()
-            color   = "#7ed6a9" if ok else "red"
+            try:
+                ok, msg = obj.test_connection()
+            except Exception as exc:
+                ok, msg = False, str(exc)
+            color = "#7ed6a9" if ok else "red"
             QTimer.singleShot(0, lambda: self._on_lm_test_done(ok, msg, color))
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_lm_test_done(self, ok: bool, msg: str, color: str):
         self.lm_test_btn.setEnabled(True)
+        self.lm_scan_progress.setVisible(False)
         self.lm_status_label.setText(("✓ " if ok else "✗ ") + msg[:70])
         self.lm_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
         if ok:
@@ -1530,8 +1559,6 @@ class SyncApp(QMainWindow):
         self.start_network_scan()
 
     def _should_auto_scan_network(self) -> bool:
-        if self.cloud_enabled_checkbox.isChecked():
-            return False
         if self._current_dest_mac:
             return False
         if self.scan_dropdown.count() <= 1 and not self.scan_performed:
@@ -1552,6 +1579,7 @@ class SyncApp(QMainWindow):
         self.scan_active = True
         self.scan_button.setEnabled(False)
         self.scan_button.setText("Scanning...")
+        self._refresh_local_machine_scan_state()
         self.scan_dropdown.clear()
         self.scan_dropdown.addItem("Scanning…")
         self.scan_dropdown.setEnabled(False)
@@ -1618,6 +1646,7 @@ class SyncApp(QMainWindow):
 
         # Keep the local-cloud machine dropdown in sync with scan results
         self.populate_local_cloud_dropdown()
+        self._refresh_local_machine_scan_state()
 
         # Auto-select the last-used destination machine if it was found
         if auto_select_index > 0:
