@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QFileDialog, QLabel, QLineEdit, QComboBox, QProgressBar, QStyle, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
 import json
 import platform
@@ -109,6 +109,13 @@ class SyncApp(QMainWindow):
         self.load_game_defaults()
         self.load_settings()
         self._apply_local_os_source_path()
+
+        self.scan_active = False
+        self.scan_timer = QTimer(self)
+        self.scan_timer.setInterval(60_000)
+        self.scan_timer.timeout.connect(self.start_network_scan)
+        self.scan_timer.start()
+        self.start_network_scan()
 
     # ── Window helpers ────────────────────────────────────────────────────────
 
@@ -262,6 +269,10 @@ class SyncApp(QMainWindow):
     # ── Network scan ──────────────────────────────────────────────────────────
 
     def start_network_scan(self):
+        if self.scan_active:
+            return
+
+        self.scan_active = True
         self.scan_button.setEnabled(False)
         self.scan_dropdown.clear()
         self.scan_dropdown.addItem("Scanning…")
@@ -274,6 +285,7 @@ class SyncApp(QMainWindow):
         self.scanner.start()
 
     def on_scan_complete(self, hosts):
+        self.scan_active = False
         self.scanned_hosts = hosts
         self.scan_dropdown.clear()
         self.scan_dropdown.addItem("— select a destination machine —")
