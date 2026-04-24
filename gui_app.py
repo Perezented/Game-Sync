@@ -206,6 +206,7 @@ class SyncApp(QMainWindow):
         self.scan_dropdown = QComboBox()
         self.scan_dropdown.addItem("— select a destination machine —")
         self.scan_dropdown.currentIndexChanged.connect(self.on_destination_selected)
+        self.scan_dropdown.setEnabled(False)
         scan_row.addWidget(self.scan_dropdown)
 
         self.scan_button = QPushButton("Scan Network")
@@ -218,6 +219,13 @@ class SyncApp(QMainWindow):
         self.scan_status_label = QLabel("")
         self.scan_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
         main_layout.addWidget(self.scan_status_label)
+
+        self.scan_progress = QProgressBar()
+        self.scan_progress.setRange(0, 0)
+        self.scan_progress.setVisible(False)
+        self.scan_progress.setFixedHeight(12)
+        self.scan_progress.setTextVisible(False)
+        main_layout.addWidget(self.scan_progress)
 
         # ── Sync Direction ────────────────────────────────────────────────────
         self.sync_direction_label = QLabel("Sync Direction:")
@@ -274,9 +282,12 @@ class SyncApp(QMainWindow):
 
         self.scan_active = True
         self.scan_button.setEnabled(False)
+        self.scan_button.setText("Scanning...")
         self.scan_dropdown.clear()
         self.scan_dropdown.addItem("Scanning…")
+        self.scan_dropdown.setEnabled(False)
         self.scan_status_label.setText("Scanning LAN for hosts…")
+        self.scan_progress.setVisible(True)
         self.scanned_hosts = []
 
         self.scanner = NetworkScanner()
@@ -292,6 +303,9 @@ class SyncApp(QMainWindow):
         for _ip, _os, label in hosts:
             self.scan_dropdown.addItem(label)
         self.scan_button.setEnabled(True)
+        self.scan_button.setText("Scan Network")
+        self.scan_progress.setVisible(False)
+        self.scan_dropdown.setEnabled(bool(hosts))
 
     def on_destination_selected(self, index):
         """Auto-set sync direction and paths when a scanned machine is selected."""
