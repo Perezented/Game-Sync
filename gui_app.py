@@ -620,12 +620,14 @@ class SyncApp(QMainWindow):
 
         self.scan_active = False
         self.sync_active = False
+        self.scan_performed = False
         self._loading   = False
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(60_000)
         self.scan_timer.timeout.connect(self.on_scan_timer_timeout)
         self.scan_timer.start()
-        self.start_network_scan()
+        if self._should_auto_scan_network():
+            self.start_network_scan()
 
         # ── Cloud state ───────────────────────────────────────────────────────
         self.gdrive_sync:       GoogleDriveSync    | None = None
@@ -1019,12 +1021,14 @@ class SyncApp(QMainWindow):
         sep.setStyleSheet("color: #555;")
         cloud_layout.addWidget(sep)
 
-        cf_row = QHBoxLayout()
-        cf_row.addWidget(QLabel("Cloud Folder:"))
+        self.cloud_folder_row = QWidget()
+        cloud_folder_layout = QHBoxLayout(self.cloud_folder_row)
+        cloud_folder_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_folder_layout.addWidget(QLabel("Cloud Folder:"))
         self.cloud_folder_input = QLineEdit()
         self.cloud_folder_input.setPlaceholderText("/GameSync/<GameName>/")
-        cf_row.addWidget(self.cloud_folder_input)
-        cloud_layout.addLayout(cf_row)
+        cloud_folder_layout.addWidget(self.cloud_folder_input)
+        cloud_layout.addWidget(self.cloud_folder_row)
 
         self.cloud_section.setLayout(cloud_layout)
         content_layout.addWidget(self.cloud_section)
@@ -1065,19 +1069,6 @@ class SyncApp(QMainWindow):
 
         content_layout.addWidget(self.dest_machine_widget)
 
-        # ── Sync Direction ────────────────────────────────────────────────────
-        self.sync_direction_label = QLabel("Sync Direction:")
-        content_layout.addWidget(self.sync_direction_label)
-
-        self.sync_direction_dropdown = QComboBox()
-        self.sync_direction_dropdown.addItems([
-            "Linux ↔ Linux",
-            "Linux ↔ Windows",
-            "Windows ↔ Linux",
-            "Windows ↔ Windows",
-        ])
-        content_layout.addWidget(self.sync_direction_dropdown)
-
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
@@ -1091,6 +1082,19 @@ class SyncApp(QMainWindow):
 
         self.dest_path = QLineEdit()
         content_layout.addWidget(self.dest_path)
+
+        # ── Sync Direction ────────────────────────────────────────────────────
+        self.sync_direction_label = QLabel("Sync Direction:")
+        content_layout.addWidget(self.sync_direction_label)
+
+        self.sync_direction_dropdown = QComboBox()
+        self.sync_direction_dropdown.addItems([
+            "Linux ↔ Linux",
+            "Linux ↔ Windows",
+            "Windows ↔ Linux",
+            "Windows ↔ Windows",
+        ])
+        content_layout.addWidget(self.sync_direction_dropdown)
 
         # ── Sync Button ───────────────────────────────────────────────────────
         self.sync_button = QPushButton("Start Sync")
@@ -1179,6 +1183,7 @@ class SyncApp(QMainWindow):
             "/GameSync/<GameName>/" if not is_local else
             "(sub-folder appended to remote path above, e.g. Zomboid)"
         )
+        self.cloud_folder_row.setVisible(not is_local)
 
     def on_gd_auth_method_changed(self, btn_id: int, checked: bool):
         if not checked:
@@ -1520,14 +1525,30 @@ class SyncApp(QMainWindow):
     # ── Network scan ──────────────────────────────────────────────────────────
 
     def on_scan_timer_timeout(self):
-        if self.sync_active:
+        if self.sync_active or not self._should_auto_scan_network():
             return
         self.start_network_scan()
+
+    def _should_auto_scan_network(self) -> bool:
+        if self.cloud_enabled_checkbox.isChecked():
+            return False
+        if self._current_dest_mac:
+            return False
+        if self.scan_dropdown.count() <= 1 and not self.scan_performed:
+            return True
+        return False
+
+    def _update_scan_button_label(self):
+        if self.scan_dropdown.currentIndex() > 0:
+            self.scan_button.setText("Rescan Network")
+        else:
+            self.scan_button.setText("Scan Network")
 
     def start_network_scan(self):
         if self.scan_active:
             return
 
+        self.scan_performed = True
         self.scan_active = True
         self.scan_button.setEnabled(False)
         self.scan_button.setText("Scanning...")
@@ -1591,7 +1612,7 @@ class SyncApp(QMainWindow):
                     auto_select_index = index
 
         self.scan_button.setEnabled(True)
-        self.scan_button.setText("Scan Network")
+        self._update_scan_button_label()
         self.scan_progress.setVisible(False)
         self.scan_dropdown.setEnabled(self.scan_dropdown.count() > 1)
 
@@ -1609,11 +1630,13 @@ class SyncApp(QMainWindow):
         if index <= 0 or index > len(self.scanned_hosts):
             self._current_dest_mac = ""
             self._current_dest_ip  = ""
+            self._update_scan_button_label()
             return
 
         dest_ip, remote_os, _label, dest_mac, is_local = self.scanned_hosts[index - 1]
         if is_local:
             self.scan_status_label.setText("This entry is the current machine. Choose another destination.")
+            self._update_scan_button_label()
             return
 
         self._current_dest_mac = dest_mac
@@ -1626,6 +1649,7 @@ class SyncApp(QMainWindow):
 
         self._set_sync_direction(self.local_os, remote_os)
         self.update_paths()
+        self._update_scan_button_label()
 
     # ── OS / path helpers ─────────────────────────────────────────────────────
 
