@@ -643,10 +643,21 @@ class SyncApp(QMainWindow):
             self.showMaximized()
 
     def get_settings_file_path(self):
+        old_name = "zomboid_sync_settings.json"
+        new_name = "game_sync_settings.json"
         if platform.system() == "Windows":
-            return Path(os.getenv("APPDATA", "~")) / "zomboid_sync_settings.json"
+            base = Path(os.getenv("APPDATA", "~"))
         else:
-            return Path.home() / ".zomboid_sync_settings.json"
+            base = Path.home()
+
+        new_path = base / new_name
+        old_path = base / old_name
+        if old_path.exists() and not new_path.exists():
+            try:
+                old_path.rename(new_path)
+            except Exception:
+                pass
+        return new_path
 
     def _get_local_ip(self):
         try:
@@ -789,49 +800,6 @@ class SyncApp(QMainWindow):
         self.game_dropdown = QComboBox()
         content_layout.addWidget(self.game_dropdown)
 
-        # ── Network Scan / Destination Machine ───────────────────────────────
-        dest_machine_label = QLabel("Destination Machine (Network Scan):")
-        content_layout.addWidget(dest_machine_label)
-
-        scan_row = QHBoxLayout()
-
-        self.scan_dropdown = QComboBox()
-        self.scan_dropdown.addItem("— select a destination machine —")
-        self.scan_dropdown.currentIndexChanged.connect(self.on_destination_selected)
-        self.scan_dropdown.setEnabled(False)
-        scan_row.addWidget(self.scan_dropdown)
-
-        self.scan_button = QPushButton("Scan Network")
-        self.scan_button.setFixedWidth(120)
-        self.scan_button.clicked.connect(self.start_network_scan)
-        scan_row.addWidget(self.scan_button)
-
-        content_layout.addLayout(scan_row)
-
-        self.scan_status_label = QLabel("")
-        self.scan_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
-        content_layout.addWidget(self.scan_status_label)
-
-        self.scan_progress = QProgressBar()
-        self.scan_progress.setRange(0, 0)
-        self.scan_progress.setVisible(False)
-        self.scan_progress.setFixedHeight(12)
-        self.scan_progress.setTextVisible(False)
-        content_layout.addWidget(self.scan_progress)
-
-        # ── Sync Direction ────────────────────────────────────────────────────
-        self.sync_direction_label = QLabel("Sync Direction:")
-        content_layout.addWidget(self.sync_direction_label)
-
-        self.sync_direction_dropdown = QComboBox()
-        self.sync_direction_dropdown.addItems([
-            "Linux ↔ Linux",
-            "Linux ↔ Windows",
-            "Windows ↔ Linux",
-            "Windows ↔ Windows",
-        ])
-        content_layout.addWidget(self.sync_direction_dropdown)
-
         # ── Cloud Storage accordion ───────────────────────────────────────────
         self.cloud_enabled_checkbox = QCheckBox("Enable Cloud Storage (middle-man sync)")
         self.cloud_enabled_checkbox.setStyleSheet("font-size: 11px; color: #9fd3ff; font-weight: bold;")
@@ -921,7 +889,7 @@ class SyncApp(QMainWindow):
         self.gdrive_section.setLayout(gd_layout)
         cloud_layout.addWidget(self.gdrive_section)
 
-        # ── Dropbox sub-section ───────────────────────────────────────────────
+        # ── Dropbox sub-section ──────────────────────────────────────────────
         self.dropbox_section = QWidget()
         self.dropbox_section.setVisible(False)
         db_layout = QVBoxLayout()
@@ -1061,6 +1029,55 @@ class SyncApp(QMainWindow):
         self.cloud_section.setLayout(cloud_layout)
         content_layout.addWidget(self.cloud_section)
 
+        # ── Network Scan / Destination Machine ───────────────────────────────
+        self.dest_machine_widget = QWidget()
+        dest_machine_layout = QVBoxLayout(self.dest_machine_widget)
+        dest_machine_layout.setContentsMargins(0, 0, 0, 0)
+        dest_machine_layout.setSpacing(4)
+
+        self.dest_machine_label = QLabel("Destination Machine (Network Scan):")
+        dest_machine_layout.addWidget(self.dest_machine_label)
+
+        scan_row = QHBoxLayout()
+        self.scan_dropdown = QComboBox()
+        self.scan_dropdown.addItem("— select a destination machine —")
+        self.scan_dropdown.currentIndexChanged.connect(self.on_destination_selected)
+        self.scan_dropdown.setEnabled(False)
+        scan_row.addWidget(self.scan_dropdown)
+
+        self.scan_button = QPushButton("Scan Network")
+        self.scan_button.setFixedWidth(120)
+        self.scan_button.clicked.connect(self.start_network_scan)
+        scan_row.addWidget(self.scan_button)
+
+        dest_machine_layout.addLayout(scan_row)
+
+        self.scan_status_label = QLabel("")
+        self.scan_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        dest_machine_layout.addWidget(self.scan_status_label)
+
+        self.scan_progress = QProgressBar()
+        self.scan_progress.setRange(0, 0)
+        self.scan_progress.setVisible(False)
+        self.scan_progress.setFixedHeight(12)
+        self.scan_progress.setTextVisible(False)
+        dest_machine_layout.addWidget(self.scan_progress)
+
+        content_layout.addWidget(self.dest_machine_widget)
+
+        # ── Sync Direction ────────────────────────────────────────────────────
+        self.sync_direction_label = QLabel("Sync Direction:")
+        content_layout.addWidget(self.sync_direction_label)
+
+        self.sync_direction_dropdown = QComboBox()
+        self.sync_direction_dropdown.addItems([
+            "Linux ↔ Linux",
+            "Linux ↔ Windows",
+            "Windows ↔ Linux",
+            "Windows ↔ Windows",
+        ])
+        content_layout.addWidget(self.sync_direction_dropdown)
+
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
@@ -1138,6 +1155,12 @@ class SyncApp(QMainWindow):
         self.push_cloud_btn.setVisible(enabled)
         self.pull_cloud_btn.setVisible(enabled)
         self.cloud_op_status_label.setVisible(enabled)
+        # Hide sync direction and destination path when cloud storage is enabled.
+        self.sync_direction_label.setVisible(not enabled)
+        self.sync_direction_dropdown.setVisible(not enabled)
+        self.dest_machine_widget.setVisible(not enabled)
+        self.dest_label.setVisible(not enabled)
+        self.dest_path.setVisible(not enabled)
         if enabled:
             self._refresh_cloud_folder_default()
         self.save_settings()
@@ -1715,6 +1738,12 @@ class SyncApp(QMainWindow):
         finally:
             self._loading = False
 
+        # If dest_path is still empty after restoring settings, fill it from
+        # the game defaults so the field is never left blank on first launch
+        # or when no path has been saved yet for the current game.
+        if not self.dest_path.text():
+            self.update_paths()
+
     def _game_machine_key(self) -> str:
         """Unique key for the current (game, destination-MAC) combination."""
         game = self.game_dropdown.currentText() or "__unknown__"
@@ -1752,10 +1781,11 @@ class SyncApp(QMainWindow):
             src = dst = ""
 
         # 2. Override with any saved paths for this specific game + destination machine
+        #    Use 'or' so an empty saved string still falls back to the game default.
         key   = self._game_machine_key()
         saved = self.previous_paths.get("game_machine_paths", {}).get(key, {})
-        src   = saved.get("source_path", src)
-        dst   = saved.get("dest_path",   dst)
+        src   = saved.get("source_path") or src
+        dst   = saved.get("dest_path")   or dst
 
         self.source_path.setText(src)
         self.dest_path.setText(dst)

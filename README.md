@@ -1,6 +1,6 @@
 # Game Sync App
 
-A small game sync utility that started (and can be expanded for more games without Steam Cloud Saves) for Project Zomboid that helps keep save files in sync across machines and platforms.
+A small game sync utility that started for Project Zomboid (and can be expanded for more games without Steam Cloud Saves) that helps keep save files in sync across machines and platforms.
 
 ## Overview
 
