@@ -4,7 +4,7 @@
       "name": "Project Zomboid",
       "defaults": {
         "windows": "%USERPROFILE%\\Zomboid\\Saves",
-        "linux": "~/.Zomboid/Saves",
+        "linux": "~/Zomboid/Saves",
         "steamdeck": "~/Zomboid/Saves"
       }
     },

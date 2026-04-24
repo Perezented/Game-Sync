@@ -44,16 +44,13 @@ class SyncApp(QMainWindow):
         widget = QWidget()
         main_layout = QVBoxLayout()
 
-        # Top Group / Header
+        # Header: Title and Top-Right Buttons
+        header_layout = QHBoxLayout()
+
         title_label = QLabel("Game Sync Tool")
         title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: white;")
-        main_layout.addWidget(title_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(title_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        subtitle_label = QLabel("Sync your games across LAN machines with ease")
-        subtitle_label.setStyleSheet("font-size: 16px; color: lightgray;")
-        main_layout.addWidget(subtitle_label, alignment=Qt.AlignmentFlag.AlignCenter)
-
-        # Top-right corner buttons for Minimize, Maximize, Close
         window_control_layout = QHBoxLayout()
         window_control_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
         minimize_button = QPushButton("_", self)
@@ -71,7 +68,13 @@ class SyncApp(QMainWindow):
         close_button.clicked.connect(self.close)
         window_control_layout.addWidget(close_button)
 
-        main_layout.addLayout(window_control_layout)
+        header_layout.addLayout(window_control_layout)
+        main_layout.addLayout(header_layout)
+
+        # Subtitle
+        subtitle_label = QLabel("Sync your games across LAN machines with ease")
+        subtitle_label.setStyleSheet("font-size: 16px; color: lightgray;")
+        main_layout.addWidget(subtitle_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # Header Description, Notes, Warnings, Tips
         description_label = QLabel("Select your game, choose the destination machine, and start syncing your game files effortlessly.")
@@ -82,9 +85,9 @@ class SyncApp(QMainWindow):
         note_label.setStyleSheet("font-size: 12px; color: lightgreen;")
         main_layout.addWidget(note_label)
 
-        warning_label = QLabel("Syncing large game files may take time. Please be patient and do not interrupt the process.")
-        warning_label.setStyleSheet("font-size: 12px; color: yellow;")
-        main_layout.addWidget(warning_label)
+        # warning_label = QLabel("Syncing large game files may take time. Please be patient and do not interrupt the process.")
+        # warning_label.setStyleSheet("font-size: 12px; color: yellow;")
+        # main_layout.addWidget(warning_label)
 
         tip_label = QLabel("Use the 'Sync Direction' option to specify whether you want to sync from the source machine to the destination machine or vice versa.")
         tip_label.setStyleSheet("font-size: 12px; color: lightblue;")
@@ -145,8 +148,12 @@ class SyncApp(QMainWindow):
         # Spacer between groups
         main_layout.addStretch(1)
 
-        # Footer: Buttons and Progress Bar
+        # Footer: Buttons, Warning, and Progress Bar
         footer_layout = QVBoxLayout()
+
+        sync_warning_label = QLabel("Syncing large game files may take time. Please ensure uninterrupted network connectivity.")
+        sync_warning_label.setStyleSheet("font-size: 12px; color: orange;")
+        footer_layout.addWidget(sync_warning_label)
 
         self.sync_button = QPushButton("Start Sync")
         self.sync_button.clicked.connect(self.start_sync)
