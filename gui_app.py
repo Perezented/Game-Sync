@@ -386,6 +386,77 @@ class CloudWorkerThread(QThread):
             self.finished.emit(False, str(exc))
 
 
+# ── Local network machine ("private cloud") helper ────────────────────────────
+
+class LocalNetworkSync:
+    """Push/pull saves to/from any SSH-accessible machine on the LAN (e.g. a Pi)."""
+
+    def __init__(self, ip: str, username: str, remote_base: str,
+                 ssh_port: int = 22, ssh_key: str = ""):
+        self.ip          = ip
+        self.username    = username
+        self.remote_base = remote_base.rstrip("/")
+        self.ssh_port    = ssh_port
+        self.ssh_key     = ssh_key  # path to private key, optional
+
+    def is_authenticated(self) -> bool:
+        return bool(self.ip and self.username)
+
+    def _ssh_opts(self) -> list[str]:
+        opts = ["-p", str(self.ssh_port), "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=5"]
+        if self.ssh_key:
+            opts += ["-i", self.ssh_key]
+        return opts
+
+    def _remote_addr(self, subpath: str = "") -> str:
+        return f"{self.username}@{self.ip}:{self.remote_base}/{subpath.lstrip('/')}"
+
+    def test_connection(self) -> tuple[bool, str]:
+        cmd = ["ssh"] + self._ssh_opts() + [
+            f"{self.username}@{self.ip}", "echo OK"
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            if result.returncode == 0:
+                return True, "Connection successful."
+            return False, result.stderr.strip() or "Connection failed."
+        except Exception as exc:
+            return False, str(exc)
+
+    def upload(self, local_path: str | Path, cloud_folder: str):
+        lp    = Path(local_path)
+        dest  = self._remote_addr(cloud_folder)
+        # rsync preferred; fall back to scp -r
+        rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        if rsync:
+            cmd = ["rsync", "-az", "--mkpath",
+                   "-e", "ssh " + " ".join(self._ssh_opts()),
+                   str(lp) + ("/" if lp.is_dir() else ""),
+                   dest]
+        else:
+            cmd = ["scp"] + self._ssh_opts() + ["-r", str(lp), dest]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
+
+    def download(self, cloud_folder: str, local_path: str | Path):
+        lp   = Path(local_path)
+        lp.mkdir(parents=True, exist_ok=True)
+        src  = self._remote_addr(cloud_folder)
+        rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        if rsync:
+            cmd = ["rsync", "-az",
+                   "-e", "ssh " + " ".join(self._ssh_opts()),
+                   src + "/",
+                   str(lp)]
+        else:
+            cmd = ["scp"] + self._ssh_opts() + ["-r", src, str(lp)]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SyncApp(QMainWindow):
@@ -429,9 +500,10 @@ class SyncApp(QMainWindow):
         self.start_network_scan()
 
         # ── Cloud state ───────────────────────────────────────────────────────
-        self.gdrive_sync:   GoogleDriveSync | None = None
-        self.dropbox_sync:  DropboxSync     | None = None
-        self.cloud_worker:  CloudWorkerThread | None = None
+        self.gdrive_sync:       GoogleDriveSync    | None = None
+        self.dropbox_sync:      DropboxSync        | None = None
+        self.local_network_sync: LocalNetworkSync  | None = None
+        self.cloud_worker:      CloudWorkerThread  | None = None
 
     # ── Window helpers ────────────────────────────────────────────────────────
 
@@ -629,7 +701,7 @@ class SyncApp(QMainWindow):
         provider_row = QHBoxLayout()
         provider_row.addWidget(QLabel("Provider:"))
         self.cloud_provider_group = QButtonGroup(self)
-        for idx, name in enumerate(["Google Drive", "Dropbox", "Both"]):
+        for idx, name in enumerate(["Google Drive", "Dropbox", "Both (GDrive+Dropbox)", "Local Network Machine"]):
             rb = QRadioButton(name)
             rb.setStyleSheet("font-size: 11px;")
             if idx == 0:
@@ -749,6 +821,79 @@ class SyncApp(QMainWindow):
         self.dropbox_section.setLayout(db_layout)
         cloud_layout.addWidget(self.dropbox_section)
 
+        # ── Local Network Machine sub-section ─────────────────────────────────
+        self.local_machine_section = QWidget()
+        self.local_machine_section.setVisible(False)
+        lm_layout = QVBoxLayout()
+        lm_layout.setContentsMargins(0, 0, 0, 0)
+        lm_layout.setSpacing(4)
+
+        lm_header = QLabel("— Local Network Machine —")
+        lm_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
+        lm_layout.addWidget(lm_header)
+
+        lm_host_row = QHBoxLayout()
+        lm_host_label = QLabel("Machine:")
+        lm_host_label.setFixedWidth(80)
+        lm_host_row.addWidget(lm_host_label)
+        self.lm_host_dropdown = QComboBox()
+        self.lm_host_dropdown.addItem("— select from scanned machines —")
+        self.lm_host_dropdown.currentIndexChanged.connect(self._on_lm_host_selected)
+        lm_host_row.addWidget(self.lm_host_dropdown)
+        lm_layout.addLayout(lm_host_row)
+
+        lm_user_row = QHBoxLayout()
+        lm_user_label = QLabel("Username:")
+        lm_user_label.setFixedWidth(80)
+        lm_user_row.addWidget(lm_user_label)
+        self.lm_username_input = QLineEdit()
+        self.lm_username_input.setPlaceholderText("e.g.  pi  or  user")
+        lm_user_row.addWidget(self.lm_username_input)
+        lm_layout.addLayout(lm_user_row)
+
+        lm_path_row = QHBoxLayout()
+        lm_path_label = QLabel("Remote path:")
+        lm_path_label.setFixedWidth(80)
+        lm_path_row.addWidget(lm_path_label)
+        self.lm_remote_path_input = QLineEdit()
+        self.lm_remote_path_input.setPlaceholderText("e.g.  /home/pi/GameSync")
+        lm_path_row.addWidget(self.lm_remote_path_input)
+        lm_layout.addLayout(lm_path_row)
+
+        lm_key_row = QHBoxLayout()
+        lm_key_label = QLabel("SSH key:")
+        lm_key_label.setFixedWidth(80)
+        lm_key_row.addWidget(lm_key_label)
+        self.lm_ssh_key_input = QLineEdit()
+        self.lm_ssh_key_input.setPlaceholderText("(optional) path to private key, e.g. ~/.ssh/id_rsa")
+        lm_key_row.addWidget(self.lm_ssh_key_input)
+        lm_browse_key_btn = QPushButton("Browse")
+        lm_browse_key_btn.setFixedWidth(60)
+        lm_browse_key_btn.clicked.connect(self._browse_ssh_key)
+        lm_key_row.addWidget(lm_browse_key_btn)
+        lm_layout.addLayout(lm_key_row)
+
+        lm_port_test_row = QHBoxLayout()
+        lm_port_label = QLabel("SSH port:")
+        lm_port_label.setFixedWidth(80)
+        lm_port_test_row.addWidget(lm_port_label)
+        self.lm_port_input = QLineEdit("22")
+        self.lm_port_input.setFixedWidth(50)
+        lm_port_test_row.addWidget(self.lm_port_input)
+        lm_port_test_row.addSpacing(10)
+        self.lm_test_btn = QPushButton("Test Connection")
+        self.lm_test_btn.setFixedWidth(130)
+        self.lm_test_btn.clicked.connect(self._test_local_machine_connection)
+        lm_port_test_row.addWidget(self.lm_test_btn)
+        self.lm_status_label = QLabel("Not configured")
+        self.lm_status_label.setStyleSheet("font-size: 10px; color: gray;")
+        lm_port_test_row.addWidget(self.lm_status_label)
+        lm_port_test_row.addStretch()
+        lm_layout.addLayout(lm_port_test_row)
+
+        self.local_machine_section.setLayout(lm_layout)
+        cloud_layout.addWidget(self.local_machine_section)
+
         # ── Cloud folder path ─────────────────────────────────────────────────
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -816,7 +961,15 @@ class SyncApp(QMainWindow):
         main_layout.addWidget(self.progress_bar)
 
         widget.setLayout(main_layout)
-        self.setCentralWidget(widget)
+
+        # ── Scroll wrapper ────────────────────────────────────────────────────
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(widget)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("QScrollArea { border: none; }")
+        self.setCentralWidget(scroll_area)
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
 
@@ -835,9 +988,16 @@ class SyncApp(QMainWindow):
     def on_cloud_provider_changed(self, btn_id: int, checked: bool):
         if not checked:
             return
-        # 0=GDrive, 1=Dropbox, 2=Both
+        # 0=GDrive, 1=Dropbox, 2=Both(GDrive+Dropbox), 3=LocalMachine
         self.gdrive_section.setVisible(btn_id in (0, 2))
         self.dropbox_section.setVisible(btn_id in (1, 2))
+        self.local_machine_section.setVisible(btn_id == 3)
+        # Cloud folder label changes context for local machine mode
+        is_local = btn_id == 3
+        self.cloud_folder_input.setPlaceholderText(
+            "/GameSync/<GameName>/" if not is_local else
+            "(sub-folder appended to remote path above, e.g. Zomboid)"
+        )
 
     def on_gd_auth_method_changed(self, btn_id: int, checked: bool):
         if not checked:
@@ -959,18 +1119,23 @@ class SyncApp(QMainWindow):
 
     def _active_cloud_sync_objects(self) -> list:
         """Return whichever cloud sync objects are ready based on selected provider."""
-        btn_id  = self.cloud_provider_group.checkedId()  # 0=GDrive, 1=Dropbox, 2=Both
+        btn_id  = self.cloud_provider_group.checkedId()  # 0=GDrive, 1=Dropbox, 2=Both, 3=Local
         objects = []
         if btn_id in (0, 2) and self.gdrive_sync and self.gdrive_sync.is_authenticated():
             objects.append(("Google Drive", self.gdrive_sync))
         if btn_id in (1, 2) and self.dropbox_sync and self.dropbox_sync.is_authenticated():
             objects.append(("Dropbox", self.dropbox_sync))
+        if btn_id == 3 and self.local_network_sync and self.local_network_sync.is_authenticated():
+            objects.append(("Local Machine", self.local_network_sync))
         return objects
 
     def _cloud_folder_for_game(self) -> str:
         folder = self.cloud_folder_input.text().strip()
+        game   = self.game_dropdown.currentText() or "Game"
         if not folder:
-            game   = self.game_dropdown.currentText() or "Game"
+            # Local machine mode: just the game name as a sub-folder under remote_base
+            if self.cloud_provider_group.checkedId() == 3:
+                return game
             folder = f"/GameSync/{game}/"
         return folder
 
@@ -1043,6 +1208,112 @@ class SyncApp(QMainWindow):
         self.pull_cloud_btn.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setVisible(False)
+
+    # ── Local network machine helpers ─────────────────────────────────────────
+
+    def populate_local_cloud_dropdown(self):
+        """Re-fill the local machine dropdown from whatever was last scanned."""
+        current_idx = self.lm_host_dropdown.currentIndex()
+        current_text = self.lm_host_dropdown.currentText()
+
+        self.lm_host_dropdown.blockSignals(True)
+        self.lm_host_dropdown.clear()
+        self.lm_host_dropdown.addItem("— select from scanned machines —")
+
+        for ip, os_type, label, mac, is_local in self.scanned_hosts:
+            if not is_local:
+                self.lm_host_dropdown.addItem(label)
+
+        # Re-select previously selected machine if still present
+        saved_ip = self.previous_paths.get("lm_ip", "")
+        if saved_ip:
+            for i in range(self.lm_host_dropdown.count()):
+                if saved_ip in self.lm_host_dropdown.itemText(i):
+                    self.lm_host_dropdown.setCurrentIndex(i)
+                    break
+        elif current_text and current_text != "— select from scanned machines —":
+            idx = self.lm_host_dropdown.findText(current_text)
+            if idx >= 0:
+                self.lm_host_dropdown.setCurrentIndex(idx)
+
+        self.lm_host_dropdown.blockSignals(False)
+
+    def _on_lm_host_selected(self, index: int):
+        if index <= 0:
+            return
+        # Find the IP from the label and store it; try to auto-fill username hints
+        label = self.lm_host_dropdown.currentText()
+        for ip, os_type, disp_label, mac, is_local in self.scanned_hosts:
+            if disp_label == label:
+                self.previous_paths["lm_ip"] = ip
+                # Auto-suggest username based on detected OS
+                if not self.lm_username_input.text():
+                    self.lm_username_input.setPlaceholderText(
+                        "pi  (Raspberry Pi?)" if os_type == "Linux" else "Administrator"
+                    )
+                break
+        self._build_local_network_sync()
+
+    def _browse_ssh_key(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select SSH Private Key",
+            str(Path.home() / ".ssh"),
+            "All files (*)"
+        )
+        if path:
+            self.lm_ssh_key_input.setText(path)
+
+    def _build_local_network_sync(self) -> bool:
+        """Create a LocalNetworkSync from the current UI fields. Returns True if valid."""
+        ip       = self.previous_paths.get("lm_ip", "")
+        username = self.lm_username_input.text().strip()
+        rpath    = self.lm_remote_path_input.text().strip()
+        port_txt = self.lm_port_input.text().strip()
+        key      = self.lm_ssh_key_input.text().strip()
+
+        # Pull IP from dropdown if not yet stored
+        if not ip:
+            label = self.lm_host_dropdown.currentText()
+            for ip2, _, disp, _, _ in self.scanned_hosts:
+                if disp == label:
+                    ip = ip2
+                    break
+
+        try:
+            port = int(port_txt) if port_txt else 22
+        except ValueError:
+            port = 22
+
+        if not ip or not username or not rpath:
+            return False
+
+        self.local_network_sync = LocalNetworkSync(ip, username, rpath, port, key)
+        return True
+
+    def _test_local_machine_connection(self):
+        if not self._build_local_network_sync():
+            self.lm_status_label.setText("Fill in Machine, Username, and Remote Path first.")
+            self.lm_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            return
+
+        self.lm_test_btn.setEnabled(False)
+        self.lm_status_label.setText("Testing…")
+        self.lm_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+
+        import threading  # noqa: PLC0415
+        obj = self.local_network_sync
+        def _run():
+            ok, msg = obj.test_connection()
+            color   = "#7ed6a9" if ok else "red"
+            QTimer.singleShot(0, lambda: self._on_lm_test_done(ok, msg, color))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_lm_test_done(self, ok: bool, msg: str, color: str):
+        self.lm_test_btn.setEnabled(True)
+        self.lm_status_label.setText(("✓ " if ok else "✗ ") + msg[:70])
+        self.lm_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
+        if ok:
+            self.save_settings()
 
     # ── Network scan ──────────────────────────────────────────────────────────
 
@@ -1121,6 +1392,9 @@ class SyncApp(QMainWindow):
         self.scan_button.setText("Scan Network")
         self.scan_progress.setVisible(False)
         self.scan_dropdown.setEnabled(self.scan_dropdown.count() > 1)
+
+        # Keep the local-cloud machine dropdown in sync with scan results
+        self.populate_local_cloud_dropdown()
 
         # Auto-select the last-used destination machine if it was found
         if auto_select_index > 0:
@@ -1245,6 +1519,18 @@ class SyncApp(QMainWindow):
                         self.db_status_label.setText("✓ Connected")
                         self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
 
+                # Local network machine
+                self.lm_username_input.setText(self.previous_paths.get("lm_username", ""))
+                self.lm_remote_path_input.setText(self.previous_paths.get("lm_remote_path", ""))
+                self.lm_port_input.setText(self.previous_paths.get("lm_port", "22"))
+                self.lm_ssh_key_input.setText(self.previous_paths.get("lm_ssh_key", ""))
+                if self.previous_paths.get("lm_ip") and self.previous_paths.get("lm_username"):
+                    self.lm_status_label.setText(
+                        f"Saved: {self.previous_paths['lm_ip']} "
+                        f"({self.previous_paths['lm_username']})"
+                    )
+                    self.lm_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+
         except Exception as err:
             print(f"Could not load settings: {err}")
         finally:
@@ -1331,6 +1617,12 @@ class SyncApp(QMainWindow):
         settings["gdrive_client_secret"] = self.gd_client_secret_input.text()
         settings["dropbox_app_key"]      = self.db_app_key_input.text()
         settings["dropbox_app_secret"]   = self.db_app_secret_input.text()
+        # Local machine
+        settings["lm_ip"]          = self.previous_paths.get("lm_ip", "")
+        settings["lm_username"]    = self.lm_username_input.text()
+        settings["lm_remote_path"] = self.lm_remote_path_input.text()
+        settings["lm_port"]        = self.lm_port_input.text()
+        settings["lm_ssh_key"]     = self.lm_ssh_key_input.text()
 
         try:
             with open(self.settings_file, "w") as f:
