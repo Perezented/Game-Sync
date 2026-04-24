@@ -3,6 +3,7 @@ import os
 import socket
 import ipaddress
 import concurrent.futures
+import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
@@ -16,7 +17,7 @@ import platform
 
 class NetworkScanner(QThread):
     """Scans the local /24 subnet for live hosts and guesses their OS."""
-    scan_complete = pyqtSignal(list)  # list of (ip, os_type, label)
+    scan_complete = pyqtSignal(list)  # list of (ip, os_type, label, mac)
     scan_status   = pyqtSignal(str)   # progress messages
 
     # Port -> OS hint, checked in priority order
@@ -35,7 +36,7 @@ class NetworkScanner(QThread):
             return
 
         network = ipaddress.IPv4Network(f"{local_ip}/24", strict=False)
-        hosts   = [str(h) for h in network.hosts() if str(h) != local_ip]
+        hosts   = [str(h) for h in network.hosts()]
 
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=64) as executor:
@@ -84,8 +85,24 @@ class NetworkScanner(QThread):
         except Exception:
             hostname = ip
 
+        mac = self._get_mac_for_ip(ip)
         label = f"{ip}  ({hostname})  [{os_type}]"
-        return (ip, os_type, label)
+        return (ip, os_type, label, mac)
+
+    def _get_mac_for_ip(self, ip):
+        try:
+            result = subprocess.run(
+                ["ip", "neigh", "show", ip],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            parts = result.stdout.strip().split()
+            if "lladdr" in parts:
+                return parts[parts.index("lladdr") + 1].lower()
+        except Exception:
+            pass
+        return ""
 
 
 class SyncApp(QMainWindow):
@@ -98,8 +115,9 @@ class SyncApp(QMainWindow):
         self.settings_file  = self.get_settings_file_path()
         self.game_defaults  = {}
         self.previous_paths = {}
-        self.scanned_hosts  = []  # list of (ip, os_type, label)
+        self.scanned_hosts  = []  # list of (ip, os_type, label, mac, is_local)
         self.local_os       = "Linux" if platform.system() != "Windows" else "Windows"
+        self.local_interfaces, self.local_ips, self.local_macs = self._get_local_network_identity()
 
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window | Qt.WindowType.CustomizeWindowHint)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
@@ -130,6 +148,60 @@ class SyncApp(QMainWindow):
             return Path(os.getenv("APPDATA", "~")) / "zomboid_sync_settings.json"
         else:
             return Path.home() / ".zomboid_sync_settings.json"
+
+    def _get_local_ip(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return None
+
+    def _get_local_network_identity(self):
+        interfaces = []
+        local_ips = set()
+        local_macs = set()
+
+        if platform.system() != "Windows":
+            try:
+                result = subprocess.run(
+                    ["ip", "-o", "-4", "addr", "show", "up", "scope", "global"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if "inet" not in parts:
+                        continue
+
+                    iface = parts[1]
+                    ip = parts[parts.index("inet") + 1].split("/")[0]
+                    mac_path = Path("/sys/class/net") / iface / "address"
+                    mac = ""
+
+                    if mac_path.exists():
+                        mac = mac_path.read_text(encoding="utf-8").strip().lower()
+
+                    interfaces.append({"iface": iface, "ip": ip, "mac": mac})
+                    local_ips.add(ip)
+                    if mac:
+                        local_macs.add(mac)
+            except Exception:
+                pass
+
+        fallback_ip = self._get_local_ip()
+        if not interfaces and fallback_ip:
+            interfaces.append({"iface": "local", "ip": fallback_ip, "mac": ""})
+            local_ips.add(fallback_ip)
+
+        return interfaces, local_ips, local_macs
+
+    def _is_local_machine(self, ip, mac):
+        normalized_mac = (mac or "").lower()
+        return ip in self.local_ips or (normalized_mac and normalized_mac in self.local_macs)
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -297,21 +369,57 @@ class SyncApp(QMainWindow):
 
     def on_scan_complete(self, hosts):
         self.scan_active = False
-        self.scanned_hosts = hosts
+        prepared_hosts = []
+        seen_hosts = set()
         self.scan_dropdown.clear()
         self.scan_dropdown.addItem("— select a destination machine —")
-        for _ip, _os, label in hosts:
+
+        for ip, os_type, label, mac in hosts:
+            normalized_mac = (mac or "").lower()
+            host_key = (ip, normalized_mac)
+            if host_key in seen_hosts:
+                continue
+
+            is_local = self._is_local_machine(ip, normalized_mac)
+            display_label = f"{label} (this machine)" if is_local else label
+            prepared_hosts.append((ip, os_type, display_label, normalized_mac, is_local))
+            seen_hosts.add(host_key)
+
+        for interface in self.local_interfaces:
+            ip = interface["ip"]
+            mac = (interface["mac"] or "").lower()
+            host_key = (ip, mac)
+            if host_key in seen_hosts:
+                continue
+
+            hostname = socket.gethostname()
+            iface_name = interface["iface"]
+            display_label = f"{ip}  ({hostname} / {iface_name})  [{self.local_os}] (this machine)"
+            prepared_hosts.append((ip, self.local_os, display_label, mac, True))
+            seen_hosts.add(host_key)
+
+        self.scanned_hosts = prepared_hosts
+
+        for index, (_ip, _os, label, _mac, is_local) in enumerate(self.scanned_hosts, start=1):
             self.scan_dropdown.addItem(label)
+            if is_local:
+                self.scan_dropdown.setItemData(index, QColor("orange"), Qt.ItemDataRole.ForegroundRole)
+
         self.scan_button.setEnabled(True)
         self.scan_button.setText("Scan Network")
         self.scan_progress.setVisible(False)
-        self.scan_dropdown.setEnabled(bool(hosts))
+        self.scan_dropdown.setEnabled(self.scan_dropdown.count() > 1)
 
     def on_destination_selected(self, index):
         """Auto-set sync direction and paths when a scanned machine is selected."""
         if index <= 0 or index > len(self.scanned_hosts):
             return
-        _ip, remote_os, _label = self.scanned_hosts[index - 1]
+
+        _ip, remote_os, _label, _mac, is_local = self.scanned_hosts[index - 1]
+        if is_local:
+            self.scan_status_label.setText("This entry is the current machine. Choose another destination.")
+            return
+
         self._set_sync_direction(self.local_os, remote_os)
         self.update_paths()
 
