@@ -114,11 +114,10 @@ class SyncApp(QMainWindow):
 
         self.sync_direction_dropdown = QComboBox()
         self.sync_direction_dropdown.addItems([
-            "Local (Windows/Linux) -> LAN",
-            "LAN -> Local (Windows/Linux)",
-            "Windows -> Linux",
-            "Linux -> Windows",
-            "Windows -> Windows"
+            "Linux <-> Linux",
+            "Linux <-> Windows",
+            "Windows <-> Linux",
+            "Windows <-> Windows"
         ])
         self.sync_direction_dropdown.currentIndexChanged.connect(self.update_paths)
         group1_layout.addWidget(self.sync_direction_dropdown)
