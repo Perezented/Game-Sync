@@ -7,12 +7,32 @@ import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
-    QFileDialog, QLabel, QLineEdit, QComboBox, QProgressBar, QStyle, QSizePolicy
+    QFileDialog, QLabel, QLineEdit, QComboBox, QProgressBar, QStyle, QSizePolicy,
+    QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QFrame, QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
 import json
 import platform
+import webbrowser
+import urllib.parse
+
+# ── Optional cloud dependencies (installed separately) ────────────────────────
+try:
+    from googleapiclient.discovery import build as gdrive_build
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.oauth2.credentials import Credentials as GCredentials
+    from google.auth.transport.requests import Request as GRequest
+    GDRIVE_AVAILABLE = True
+except ImportError:
+    GDRIVE_AVAILABLE = False
+
+try:
+    import dropbox as _dropbox_module
+    from dropbox import DropboxOAuth2FlowNoRedirect
+    DROPBOX_AVAILABLE = True
+except ImportError:
+    DROPBOX_AVAILABLE = False
 
 
 class NetworkScanner(QThread):
@@ -105,6 +125,269 @@ class NetworkScanner(QThread):
         return ""
 
 
+# ── Google Drive helper ───────────────────────────────────────────────────────
+
+class GoogleDriveSync:
+    """Thin wrapper around the Google Drive v3 REST API."""
+
+    SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+    def __init__(self, client_id: str, client_secret: str, token_data: dict | None = None):
+        self.client_id     = client_id
+        self.client_secret = client_secret
+        self.creds         = None
+        if token_data and GDRIVE_AVAILABLE:
+            try:
+                self.creds = GCredentials.from_authorized_user_info(token_data, self.SCOPES)
+            except Exception:
+                self.creds = None
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+
+    def authenticate(self) -> dict:
+        """Run the local-server OAuth flow. Returns serialisable token dict."""
+        if not GDRIVE_AVAILABLE:
+            raise RuntimeError(
+                "google-api-python-client is not installed.\n"
+                "Run:  pip install google-api-python-client google-auth-oauthlib"
+            )
+        client_config = {
+            "installed": {
+                "client_id":      self.client_id,
+                "client_secret":  self.client_secret,
+                "auth_uri":       "https://accounts.google.com/o/oauth2/auth",
+                "token_uri":      "https://oauth2.googleapis.com/token",
+                "redirect_uris":  ["http://localhost"],
+            }
+        }
+        flow       = InstalledAppFlow.from_client_config(client_config, self.SCOPES)
+        self.creds = flow.run_local_server(port=0)
+        return json.loads(self.creds.to_json())
+
+    def is_authenticated(self) -> bool:
+        if not self.creds or not GDRIVE_AVAILABLE:
+            return False
+        if self.creds.expired and self.creds.refresh_token:
+            try:
+                self.creds.refresh(GRequest())
+            except Exception:
+                return False
+        return self.creds.valid
+
+    def refreshed_token(self) -> dict | None:
+        """Return the (potentially refreshed) token as a dict, or None."""
+        if self.creds and GDRIVE_AVAILABLE:
+            return json.loads(self.creds.to_json())
+        return None
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _service(self):
+        return gdrive_build("drive", "v3", credentials=self.creds)
+
+    def _get_or_create_folder(self, svc, folder_path: str, parent_id: str = "root") -> str:
+        parts = [p for p in folder_path.strip("/").split("/") if p]
+        for part in parts:
+            q       = (f"name='{part}' and "
+                       f"mimeType='application/vnd.google-apps.folder' and "
+                       f"'{parent_id}' in parents and trashed=false")
+            results = svc.files().list(q=q, fields="files(id)").execute()
+            files   = results.get("files", [])
+            if files:
+                parent_id = files[0]["id"]
+            else:
+                meta      = {"name": part,
+                             "mimeType": "application/vnd.google-apps.folder",
+                             "parents": [parent_id]}
+                parent_id = svc.files().create(body=meta, fields="id").execute()["id"]
+        return parent_id
+
+    def _upload_file(self, svc, file_path: Path, folder_id: str):
+        from googleapiclient.http import MediaFileUpload  # noqa: PLC0415
+        q       = f"name='{file_path.name}' and '{folder_id}' in parents and trashed=false"
+        results = svc.files().list(q=q, fields="files(id)").execute()
+        files   = results.get("files", [])
+        media   = MediaFileUpload(str(file_path), resumable=True)
+        if files:
+            svc.files().update(fileId=files[0]["id"], media_body=media).execute()
+        else:
+            meta = {"name": file_path.name, "parents": [folder_id]}
+            svc.files().create(body=meta, media_body=media).execute()
+
+    def _download_folder(self, svc, folder_id: str, local_dir: Path):
+        import io  # noqa: PLC0415
+        from googleapiclient.http import MediaIoBaseDownload  # noqa: PLC0415
+        results = svc.files().list(
+            q=f"'{folder_id}' in parents and trashed=false",
+            fields="files(id, name, mimeType)"
+        ).execute()
+        for item in results.get("files", []):
+            if item["mimeType"] == "application/vnd.google-apps.folder":
+                sub = local_dir / item["name"]
+                sub.mkdir(exist_ok=True)
+                self._download_folder(svc, item["id"], sub)
+            else:
+                request = svc.files().get_media(fileId=item["id"])
+                buf     = io.BytesIO()
+                dl      = MediaIoBaseDownload(buf, request)
+                done    = False
+                while not done:
+                    _, done = dl.next_chunk()
+                (local_dir / item["name"]).write_bytes(buf.getvalue())
+
+    # ── Public upload / download ──────────────────────────────────────────────
+
+    def upload(self, local_path: str | Path, cloud_folder: str):
+        svc       = self._service()
+        folder_id = self._get_or_create_folder(svc, cloud_folder)
+        lp        = Path(local_path)
+        if lp.is_file():
+            self._upload_file(svc, lp, folder_id)
+        elif lp.is_dir():
+            for f in lp.rglob("*"):
+                if f.is_file():
+                    rel       = f.relative_to(lp.parent)
+                    sub_path  = cloud_folder.rstrip("/") + "/" + "/".join(rel.parts[:-1])
+                    sub_id    = self._get_or_create_folder(svc, sub_path) if rel.parts[:-1] else folder_id
+                    self._upload_file(svc, f, sub_id)
+
+    def download(self, cloud_folder: str, local_path: str | Path):
+        svc       = self._service()
+        folder_id = self._get_or_create_folder(svc, cloud_folder)
+        lp        = Path(local_path)
+        lp.mkdir(parents=True, exist_ok=True)
+        self._download_folder(svc, folder_id, lp)
+
+
+# ── Dropbox helper ────────────────────────────────────────────────────────────
+
+class DropboxSync:
+    """OAuth2 Dropbox client (offline refresh token so it survives app restarts)."""
+
+    def __init__(self, app_key: str, app_secret: str,
+                 access_token: str = "", refresh_token: str = ""):
+        self.app_key       = app_key
+        self.app_secret    = app_secret
+        self.access_token  = access_token
+        self.refresh_token = refresh_token
+        self._auth_flow    = None
+        self._dbx          = None
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
+
+    def get_auth_url(self) -> str:
+        """Start PKCE flow and return the authorisation URL the user should open."""
+        if not DROPBOX_AVAILABLE:
+            raise RuntimeError(
+                "dropbox package is not installed.\n"
+                "Run:  pip install dropbox"
+            )
+        self._auth_flow = DropboxOAuth2FlowNoRedirect(
+            self.app_key,
+            consumer_secret    = self.app_secret,
+            token_access_type  = "offline",
+        )
+        return self._auth_flow.start()
+
+    def finish_auth(self, code: str) -> dict:
+        """Exchange the user-pasted code for tokens. Returns token dict."""
+        if not self._auth_flow:
+            raise RuntimeError("Call get_auth_url() first.")
+        result             = self._auth_flow.finish(code.strip())
+        self.access_token  = result.access_token
+        self.refresh_token = getattr(result, "refresh_token", "")
+        self._dbx          = None  # force re-init
+        return {"access_token": self.access_token, "refresh_token": self.refresh_token}
+
+    def is_authenticated(self) -> bool:
+        return bool(self.access_token)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _get_dbx(self):
+        if not self._dbx:
+            kwargs = dict(app_key=self.app_key, app_secret=self.app_secret)
+            if self.refresh_token:
+                kwargs["oauth2_access_token"]  = self.access_token
+                kwargs["oauth2_refresh_token"] = self.refresh_token
+            else:
+                kwargs["oauth2_access_token"] = self.access_token
+            self._dbx = _dropbox_module.Dropbox(**kwargs)
+        return self._dbx
+
+    def _upload_file(self, dbx, file_path: Path, cloud_path: str):
+        with open(file_path, "rb") as fh:
+            data = fh.read()
+        dbx.files_upload(
+            data, cloud_path,
+            mode=_dropbox_module.files.WriteMode.overwrite
+        )
+
+    def _download_folder_entries(self, dbx, result, local_dir: Path):
+        for entry in result.entries:
+            if isinstance(entry, _dropbox_module.files.FolderMetadata):
+                sub = local_dir / entry.name
+                sub.mkdir(exist_ok=True)
+                sub_result = dbx.files_list_folder(entry.path_lower)
+                self._download_folder_entries(dbx, sub_result, sub)
+            elif isinstance(entry, _dropbox_module.files.FileMetadata):
+                _, resp = dbx.files_download(entry.path_lower)
+                (local_dir / entry.name).write_bytes(resp.content)
+        if result.has_more:
+            more = dbx.files_list_folder_continue(result.cursor)
+            self._download_folder_entries(dbx, more, local_dir)
+
+    # ── Public upload / download ──────────────────────────────────────────────
+
+    def upload(self, local_path: str | Path, cloud_folder: str):
+        dbx          = self._get_dbx()
+        cloud_folder = cloud_folder.rstrip("/")
+        lp           = Path(local_path)
+        if lp.is_file():
+            self._upload_file(dbx, lp, f"{cloud_folder}/{lp.name}")
+        elif lp.is_dir():
+            for f in lp.rglob("*"):
+                if f.is_file():
+                    rel  = f.relative_to(lp.parent)
+                    dest = f"{cloud_folder}/{'/'.join(rel.parts)}"
+                    self._upload_file(dbx, f, dest)
+
+    def download(self, cloud_folder: str, local_path: str | Path):
+        dbx    = self._get_dbx()
+        lp     = Path(local_path)
+        lp.mkdir(parents=True, exist_ok=True)
+        result = dbx.files_list_folder(cloud_folder.rstrip("/"))
+        self._download_folder_entries(dbx, result, lp)
+
+
+# ── Background thread for cloud operations ────────────────────────────────────
+
+class CloudWorkerThread(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, operation: str, sync_obj, local_path: str, cloud_folder: str):
+        super().__init__()
+        self.operation   = operation  # "upload" or "download"
+        self.sync_obj    = sync_obj
+        self.local_path  = local_path
+        self.cloud_folder = cloud_folder
+
+    def run(self):
+        try:
+            self.progress.emit(f"{self.operation.title()}ing to/from cloud…")
+            if self.operation == "upload":
+                self.sync_obj.upload(self.local_path, self.cloud_folder)
+                self.finished.emit(True, "Upload complete.")
+            else:
+                self.sync_obj.download(self.cloud_folder, self.local_path)
+                self.finished.emit(True, "Download complete.")
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 class SyncApp(QMainWindow):
 
     def __init__(self):
@@ -116,6 +399,8 @@ class SyncApp(QMainWindow):
         self.game_defaults  = {}
         self.previous_paths = {}
         self.scanned_hosts  = []  # list of (ip, os_type, label, mac, is_local)
+        self._current_dest_mac = ""   # MAC of currently-selected destination
+        self._current_dest_ip  = ""   # IP  of currently-selected destination
         self.local_os       = "Linux" if platform.system() != "Windows" else "Windows"
         self.local_interfaces, self.local_ips, self.local_macs = self._get_local_network_identity()
 
@@ -128,13 +413,25 @@ class SyncApp(QMainWindow):
         self.load_settings()
         self._apply_local_os_source_path()
 
+        # ── Auto-save on any path/game/direction change ────────────────────────
+        self.game_dropdown.currentIndexChanged.connect(self._on_game_or_direction_changed)
+        self.sync_direction_dropdown.currentIndexChanged.connect(self._on_game_or_direction_changed)
+        self.source_path.editingFinished.connect(self.save_settings)
+        self.dest_path.editingFinished.connect(self.save_settings)
+
         self.scan_active = False
         self.sync_active = False
+        self._loading   = False
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(60_000)
         self.scan_timer.timeout.connect(self.on_scan_timer_timeout)
         self.scan_timer.start()
         self.start_network_scan()
+
+        # ── Cloud state ───────────────────────────────────────────────────────
+        self.gdrive_sync:   GoogleDriveSync | None = None
+        self.dropbox_sync:  DropboxSync     | None = None
+        self.cloud_worker:  CloudWorkerThread | None = None
 
     # ── Window helpers ────────────────────────────────────────────────────────
 
@@ -267,7 +564,6 @@ class SyncApp(QMainWindow):
         main_layout.addWidget(self.select_game_label)
 
         self.game_dropdown = QComboBox()
-        self.game_dropdown.currentIndexChanged.connect(self.update_paths)
         main_layout.addWidget(self.game_dropdown)
 
         # ── Network Scan / Destination Machine ───────────────────────────────
@@ -311,8 +607,163 @@ class SyncApp(QMainWindow):
             "Windows ↔ Linux",
             "Windows ↔ Windows",
         ])
-        self.sync_direction_dropdown.currentIndexChanged.connect(self.update_paths)
         main_layout.addWidget(self.sync_direction_dropdown)
+
+        # ── Cloud Storage accordion ───────────────────────────────────────────
+        self.cloud_enabled_checkbox = QCheckBox("Enable Cloud Storage (middle-man sync)")
+        self.cloud_enabled_checkbox.setStyleSheet("font-size: 11px; color: #9fd3ff; font-weight: bold;")
+        self.cloud_enabled_checkbox.toggled.connect(self.toggle_cloud_section)
+        main_layout.addWidget(self.cloud_enabled_checkbox)
+
+        self.cloud_section = QGroupBox("Cloud Sync Settings")
+        self.cloud_section.setVisible(False)
+        self.cloud_section.setStyleSheet(
+            "QGroupBox { border: 1px solid #555; border-radius: 4px; margin-top: 6px; "
+            "font-size: 11px; color: #9fd3ff; padding: 8px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; }"
+        )
+        cloud_layout = QVBoxLayout()
+        cloud_layout.setSpacing(6)
+
+        # Provider row
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(QLabel("Provider:"))
+        self.cloud_provider_group = QButtonGroup(self)
+        for idx, name in enumerate(["Google Drive", "Dropbox", "Both"]):
+            rb = QRadioButton(name)
+            rb.setStyleSheet("font-size: 11px;")
+            if idx == 0:
+                rb.setChecked(True)
+            self.cloud_provider_group.addButton(rb, idx)
+            provider_row.addWidget(rb)
+        provider_row.addStretch()
+        cloud_layout.addLayout(provider_row)
+        self.cloud_provider_group.idToggled.connect(self.on_cloud_provider_changed)
+
+        # ── Google Drive sub-section ──────────────────────────────────────────
+        self.gdrive_section = QWidget()
+        gd_layout = QVBoxLayout()
+        gd_layout.setContentsMargins(0, 0, 0, 0)
+        gd_layout.setSpacing(4)
+
+        gd_header = QLabel("— Google Drive —")
+        gd_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
+        gd_layout.addWidget(gd_header)
+
+        auth_method_row = QHBoxLayout()
+        auth_method_row.addWidget(QLabel("Auth method:"))
+        self.gd_auth_group = QButtonGroup(self)
+        self.gd_oauth_rb    = QRadioButton("OAuth (browser)")
+        self.gd_manual_rb   = QRadioButton("Client ID + Secret")
+        self.gd_oauth_rb.setChecked(True)
+        self.gd_auth_group.addButton(self.gd_oauth_rb, 0)
+        self.gd_auth_group.addButton(self.gd_manual_rb, 1)
+        self.gd_auth_group.idToggled.connect(self.on_gd_auth_method_changed)
+        auth_method_row.addWidget(self.gd_oauth_rb)
+        auth_method_row.addWidget(self.gd_manual_rb)
+        auth_method_row.addStretch()
+        gd_layout.addLayout(auth_method_row)
+
+        self.gd_credentials_widget = QWidget()
+        gd_cred_layout = QVBoxLayout()
+        gd_cred_layout.setContentsMargins(0, 0, 0, 0)
+        gd_cid_row = QHBoxLayout()
+        gd_cid_row.addWidget(QLabel("Client ID:"))
+        self.gd_client_id_input = QLineEdit()
+        self.gd_client_id_input.setPlaceholderText("Paste Google OAuth client ID")
+        gd_cid_row.addWidget(self.gd_client_id_input)
+        gd_cred_layout.addLayout(gd_cid_row)
+        gd_csec_row = QHBoxLayout()
+        gd_csec_row.addWidget(QLabel("Client Secret:"))
+        self.gd_client_secret_input = QLineEdit()
+        self.gd_client_secret_input.setPlaceholderText("Paste Google OAuth client secret")
+        self.gd_client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
+        gd_csec_row.addWidget(self.gd_client_secret_input)
+        gd_cred_layout.addLayout(gd_csec_row)
+        self.gd_credentials_widget.setLayout(gd_cred_layout)
+        self.gd_credentials_widget.setVisible(False)
+        gd_layout.addWidget(self.gd_credentials_widget)
+
+        gd_btn_row = QHBoxLayout()
+        self.gd_connect_btn = QPushButton("Connect Google Drive")
+        self.gd_connect_btn.setFixedWidth(180)
+        self.gd_connect_btn.clicked.connect(self.connect_gdrive)
+        gd_btn_row.addWidget(self.gd_connect_btn)
+        self.gd_status_label = QLabel("Not connected")
+        self.gd_status_label.setStyleSheet("font-size: 10px; color: gray;")
+        gd_btn_row.addWidget(self.gd_status_label)
+        gd_btn_row.addStretch()
+        gd_layout.addLayout(gd_btn_row)
+
+        self.gdrive_section.setLayout(gd_layout)
+        cloud_layout.addWidget(self.gdrive_section)
+
+        # ── Dropbox sub-section ───────────────────────────────────────────────
+        self.dropbox_section = QWidget()
+        self.dropbox_section.setVisible(False)
+        db_layout = QVBoxLayout()
+        db_layout.setContentsMargins(0, 0, 0, 0)
+        db_layout.setSpacing(4)
+
+        db_header = QLabel("— Dropbox —")
+        db_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
+        db_layout.addWidget(db_header)
+
+        db_key_row = QHBoxLayout()
+        db_key_row.addWidget(QLabel("App Key:"))
+        self.db_app_key_input = QLineEdit()
+        self.db_app_key_input.setPlaceholderText("Dropbox App Key")
+        db_key_row.addWidget(self.db_app_key_input)
+        db_layout.addLayout(db_key_row)
+
+        db_sec_row = QHBoxLayout()
+        db_sec_row.addWidget(QLabel("App Secret:"))
+        self.db_app_secret_input = QLineEdit()
+        self.db_app_secret_input.setPlaceholderText("Dropbox App Secret")
+        self.db_app_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
+        db_sec_row.addWidget(self.db_app_secret_input)
+        db_layout.addLayout(db_sec_row)
+
+        db_auth_row = QHBoxLayout()
+        self.db_get_url_btn = QPushButton("1. Open Auth URL")
+        self.db_get_url_btn.setFixedWidth(140)
+        self.db_get_url_btn.clicked.connect(self.dropbox_open_auth_url)
+        db_auth_row.addWidget(self.db_get_url_btn)
+        db_auth_row.addSpacing(8)
+        self.db_code_input = QLineEdit()
+        self.db_code_input.setPlaceholderText("2. Paste authorisation code here")
+        db_auth_row.addWidget(self.db_code_input)
+        self.db_finish_btn = QPushButton("3. Finish Auth")
+        self.db_finish_btn.setFixedWidth(100)
+        self.db_finish_btn.clicked.connect(self.dropbox_finish_auth)
+        db_auth_row.addWidget(self.db_finish_btn)
+        db_layout.addLayout(db_auth_row)
+
+        db_status_row = QHBoxLayout()
+        self.db_status_label = QLabel("Not connected")
+        self.db_status_label.setStyleSheet("font-size: 10px; color: gray;")
+        db_status_row.addWidget(self.db_status_label)
+        db_status_row.addStretch()
+        db_layout.addLayout(db_status_row)
+
+        self.dropbox_section.setLayout(db_layout)
+        cloud_layout.addWidget(self.dropbox_section)
+
+        # ── Cloud folder path ─────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #555;")
+        cloud_layout.addWidget(sep)
+
+        cf_row = QHBoxLayout()
+        cf_row.addWidget(QLabel("Cloud Folder:"))
+        self.cloud_folder_input = QLineEdit()
+        self.cloud_folder_input.setPlaceholderText("/GameSync/<GameName>/")
+        cf_row.addWidget(self.cloud_folder_input)
+        cloud_layout.addLayout(cf_row)
+
+        self.cloud_section.setLayout(cloud_layout)
+        main_layout.addWidget(self.cloud_section)
 
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
@@ -332,12 +783,32 @@ class SyncApp(QMainWindow):
         self.sync_button = QPushButton("Start Sync")
         self.sync_button.clicked.connect(self.start_sync)
 
+        self.push_cloud_btn = QPushButton("⬆  Push to Cloud")
+        self.push_cloud_btn.setStyleSheet("background-color: #2a5f8a; color: white;")
+        self.push_cloud_btn.setVisible(False)
+        self.push_cloud_btn.clicked.connect(self.push_to_cloud)
+
+        self.pull_cloud_btn = QPushButton("⬇  Pull from Cloud")
+        self.pull_cloud_btn.setStyleSheet("background-color: #2a6b4a; color: white;")
+        self.pull_cloud_btn.setVisible(False)
+        self.pull_cloud_btn.clicked.connect(self.pull_from_cloud)
+
+        self.cloud_op_status_label = QLabel("")
+        self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        self.cloud_op_status_label.setVisible(False)
+
         warning_label = QLabel("Syncing large game files may take time. Please be patient and do not interrupt the process.")
         warning_label.setStyleSheet("font-size: 10px; color: orange;")
         warning_label.setWordWrap(False)
         warning_label.setSizePolicy(QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred))
         main_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(self.sync_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        sync_btn_row = QHBoxLayout()
+        sync_btn_row.addWidget(self.sync_button)
+        sync_btn_row.addWidget(self.push_cloud_btn)
+        sync_btn_row.addWidget(self.pull_cloud_btn)
+        main_layout.addLayout(sync_btn_row)
+        main_layout.addWidget(self.cloud_op_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
@@ -346,6 +817,232 @@ class SyncApp(QMainWindow):
 
         widget.setLayout(main_layout)
         self.setCentralWidget(widget)
+
+    # ── Cloud UI callbacks ────────────────────────────────────────────────────
+
+    def toggle_cloud_section(self, enabled: bool):
+        self.cloud_section.setVisible(enabled)
+        # Show/hide sync buttons
+        self.sync_button.setVisible(not enabled)
+        self.push_cloud_btn.setVisible(enabled)
+        self.pull_cloud_btn.setVisible(enabled)
+        self.cloud_op_status_label.setVisible(enabled)
+        if enabled:
+            self._refresh_cloud_folder_default()
+        self.save_settings()
+        self.save_settings()
+
+    def on_cloud_provider_changed(self, btn_id: int, checked: bool):
+        if not checked:
+            return
+        # 0=GDrive, 1=Dropbox, 2=Both
+        self.gdrive_section.setVisible(btn_id in (0, 2))
+        self.dropbox_section.setVisible(btn_id in (1, 2))
+
+    def on_gd_auth_method_changed(self, btn_id: int, checked: bool):
+        if not checked:
+            return
+        self.gd_credentials_widget.setVisible(btn_id == 1)  # 1 = manual creds
+
+    def _refresh_cloud_folder_default(self):
+        """Populate cloud folder with /GameSync/<game>/ if the field is empty."""
+        if not self.cloud_folder_input.text():
+            game = self.game_dropdown.currentText() or "Game"
+            self.cloud_folder_input.setText(f"/GameSync/{game}/")
+
+    # ── Google Drive auth ─────────────────────────────────────────────────────
+
+    def connect_gdrive(self):
+        client_id     = self.gd_client_id_input.text().strip()
+        client_secret = self.gd_client_secret_input.text().strip()
+
+        if not GDRIVE_AVAILABLE:
+            self.gd_status_label.setText("Missing: install google-api-python-client google-auth-oauthlib")
+            self.gd_status_label.setStyleSheet("font-size: 10px; color: red;")
+            return
+
+        # For OAuth mode the user may leave cred fields blank (env creds)
+        if self.gd_manual_rb.isChecked() and (not client_id or not client_secret):
+            self.gd_status_label.setText("Enter Client ID + Secret first.")
+            self.gd_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            return
+
+        self.gd_connect_btn.setEnabled(False)
+        self.gd_status_label.setText("Opening browser…")
+        self.gd_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+
+        saved         = self.previous_paths.get("gdrive_token")
+        self.gdrive_sync = GoogleDriveSync(client_id, client_secret, saved)
+
+        if self.gdrive_sync.is_authenticated():
+            self._on_gdrive_connected()
+            return
+
+        # Run OAuth in a thread so the UI stays responsive
+        import threading  # noqa: PLC0415
+        def _run():
+            try:
+                token = self.gdrive_sync.authenticate()
+                self.previous_paths["gdrive_token"]          = token
+                self.previous_paths["gdrive_client_id"]      = client_id
+                self.previous_paths["gdrive_client_secret"]  = client_secret
+                self.save_settings()
+                # Signal back to main thread
+                QTimer.singleShot(0, self._on_gdrive_connected)
+            except Exception as exc:
+                msg = str(exc)
+                QTimer.singleShot(0, lambda: self._on_gdrive_error(msg))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_gdrive_connected(self):
+        self.gd_connect_btn.setEnabled(True)
+        self.gd_status_label.setText("✓ Connected")
+        self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+        # Refresh token in case it was refreshed
+        if self.gdrive_sync:
+            new_token = self.gdrive_sync.refreshed_token()
+            if new_token:
+                self.previous_paths["gdrive_token"] = new_token
+                self.save_settings()
+
+    def _on_gdrive_error(self, msg: str):
+        self.gd_connect_btn.setEnabled(True)
+        self.gd_status_label.setText(f"Error: {msg[:60]}")
+        self.gd_status_label.setStyleSheet("font-size: 10px; color: red;")
+
+    # ── Dropbox auth ──────────────────────────────────────────────────────────
+
+    def dropbox_open_auth_url(self):
+        if not DROPBOX_AVAILABLE:
+            self.db_status_label.setText("Missing: install dropbox")
+            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
+            return
+        app_key    = self.db_app_key_input.text().strip()
+        app_secret = self.db_app_secret_input.text().strip()
+        if not app_key or not app_secret:
+            self.db_status_label.setText("Enter App Key + Secret first.")
+            self.db_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            return
+        try:
+            self.dropbox_sync = DropboxSync(app_key, app_secret)
+            url = self.dropbox_sync.get_auth_url()
+            webbrowser.open(url)
+            self.db_status_label.setText("Browser opened — paste the code and click Finish Auth.")
+            self.db_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        except Exception as exc:
+            self.db_status_label.setText(str(exc)[:80])
+            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
+
+    def dropbox_finish_auth(self):
+        code = self.db_code_input.text().strip()
+        if not code:
+            self.db_status_label.setText("Paste the authorisation code first.")
+            return
+        if not self.dropbox_sync:
+            self.db_status_label.setText("Click 'Open Auth URL' first.")
+            return
+        try:
+            tokens = self.dropbox_sync.finish_auth(code)
+            self.previous_paths["dropbox_access_token"]  = tokens["access_token"]
+            self.previous_paths["dropbox_refresh_token"] = tokens.get("refresh_token", "")
+            self.previous_paths["dropbox_app_key"]       = self.db_app_key_input.text().strip()
+            self.previous_paths["dropbox_app_secret"]    = self.db_app_secret_input.text().strip()
+            self.save_settings()
+            self.db_status_label.setText("✓ Connected")
+            self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+            self.db_code_input.clear()
+        except Exception as exc:
+            self.db_status_label.setText(f"Error: {exc}")
+            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
+
+    # ── Cloud push / pull ─────────────────────────────────────────────────────
+
+    def _active_cloud_sync_objects(self) -> list:
+        """Return whichever cloud sync objects are ready based on selected provider."""
+        btn_id  = self.cloud_provider_group.checkedId()  # 0=GDrive, 1=Dropbox, 2=Both
+        objects = []
+        if btn_id in (0, 2) and self.gdrive_sync and self.gdrive_sync.is_authenticated():
+            objects.append(("Google Drive", self.gdrive_sync))
+        if btn_id in (1, 2) and self.dropbox_sync and self.dropbox_sync.is_authenticated():
+            objects.append(("Dropbox", self.dropbox_sync))
+        return objects
+
+    def _cloud_folder_for_game(self) -> str:
+        folder = self.cloud_folder_input.text().strip()
+        if not folder:
+            game   = self.game_dropdown.currentText() or "Game"
+            folder = f"/GameSync/{game}/"
+        return folder
+
+    def push_to_cloud(self):
+        local_path = self.source_path.text().strip()
+        if not local_path:
+            self.cloud_op_status_label.setText("Set a Source Path first.")
+            return
+        cloud_syncs = self._active_cloud_sync_objects()
+        if not cloud_syncs:
+            self.cloud_op_status_label.setText("No authenticated cloud provider available.")
+            return
+        self._run_cloud_op("upload", cloud_syncs, local_path)
+
+    def pull_from_cloud(self):
+        local_path = self.dest_path.text().strip() or self.source_path.text().strip()
+        if not local_path:
+            self.cloud_op_status_label.setText("Set a Destination Path first.")
+            return
+        cloud_syncs = self._active_cloud_sync_objects()
+        if not cloud_syncs:
+            self.cloud_op_status_label.setText("No authenticated cloud provider available.")
+            return
+        self._run_cloud_op("download", cloud_syncs, local_path)
+
+    def _run_cloud_op(self, operation: str, cloud_syncs: list, local_path: str):
+        # For simplicity run sequentially using the first available provider.
+        # Multi-provider: run each in sequence via the same thread chain.
+        cloud_folder = self._cloud_folder_for_game()
+        name, sync_obj = cloud_syncs[0]
+
+        self.push_cloud_btn.setEnabled(False)
+        self.pull_cloud_btn.setEnabled(False)
+        self.cloud_op_status_label.setText(f"{operation.title()}ing via {name}…")
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+        self.cloud_worker = CloudWorkerThread(operation, sync_obj, local_path, cloud_folder)
+        self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
+        self.cloud_worker.finished.connect(
+            lambda ok, msg: self._on_cloud_op_finished(ok, msg, cloud_syncs[1:], operation, local_path, cloud_folder)
+        )
+        self.cloud_worker.start()
+
+    def _on_cloud_op_finished(self, ok: bool, msg: str, remaining: list,
+                               operation: str, local_path: str, cloud_folder: str):
+        if not ok:
+            self.cloud_op_status_label.setText(f"Error: {msg[:80]}")
+            self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: red;")
+            self._reset_cloud_buttons()
+            return
+
+        if remaining:
+            # Chain to next provider
+            name, sync_obj = remaining[0]
+            self.cloud_op_status_label.setText(f"{operation.title()}ing via {name}…")
+            self.cloud_worker = CloudWorkerThread(operation, sync_obj, local_path, cloud_folder)
+            self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
+            self.cloud_worker.finished.connect(
+                lambda ok2, msg2: self._on_cloud_op_finished(ok2, msg2, remaining[1:], operation, local_path, cloud_folder)
+            )
+            self.cloud_worker.start()
+        else:
+            self.cloud_op_status_label.setText(f"✓ {msg}")
+            self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+            self._reset_cloud_buttons()
+
+    def _reset_cloud_buttons(self):
+        self.push_cloud_btn.setEnabled(True)
+        self.pull_cloud_btn.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setVisible(False)
 
     # ── Network scan ──────────────────────────────────────────────────────────
 
@@ -406,25 +1103,50 @@ class SyncApp(QMainWindow):
 
         self.scanned_hosts = prepared_hosts
 
+        last_dest_mac = self.previous_paths.get("last_dest_mac", "").lower()
+        last_dest_ip  = self.previous_paths.get("last_dest_ip",  "")
+        auto_select_index = 0
+
         for index, (_ip, _os, label, _mac, is_local) in enumerate(self.scanned_hosts, start=1):
             self.scan_dropdown.addItem(label)
             if is_local:
                 self.scan_dropdown.setItemData(index, QColor("orange"), Qt.ItemDataRole.ForegroundRole)
+            # Check if this host matches the last-used destination
+            if not is_local and auto_select_index == 0:
+                if (last_dest_mac and _mac and _mac.lower() == last_dest_mac) or \
+                   (last_dest_ip and _ip == last_dest_ip):
+                    auto_select_index = index
 
         self.scan_button.setEnabled(True)
         self.scan_button.setText("Scan Network")
         self.scan_progress.setVisible(False)
         self.scan_dropdown.setEnabled(self.scan_dropdown.count() > 1)
 
+        # Auto-select the last-used destination machine if it was found
+        if auto_select_index > 0:
+            self.scan_dropdown.setCurrentIndex(auto_select_index)
+            self.scan_status_label.setText(
+                self.scan_status_label.text() + "  (last destination auto-selected)")
+
     def on_destination_selected(self, index):
         """Auto-set sync direction and paths when a scanned machine is selected."""
         if index <= 0 or index > len(self.scanned_hosts):
+            self._current_dest_mac = ""
+            self._current_dest_ip  = ""
             return
 
-        _ip, remote_os, _label, _mac, is_local = self.scanned_hosts[index - 1]
+        dest_ip, remote_os, _label, dest_mac, is_local = self.scanned_hosts[index - 1]
         if is_local:
             self.scan_status_label.setText("This entry is the current machine. Choose another destination.")
             return
+
+        self._current_dest_mac = dest_mac
+        self._current_dest_ip  = dest_ip
+
+        # Persist the last chosen destination so we can re-select it next launch
+        self.previous_paths["last_dest_mac"] = dest_mac
+        self.previous_paths["last_dest_ip"]  = dest_ip
+        self.save_settings()
 
         self._set_sync_direction(self.local_os, remote_os)
         self.update_paths()
@@ -466,6 +1188,7 @@ class SyncApp(QMainWindow):
     def load_settings(self):
         if not self.settings_file.exists():
             return
+        self._loading = True
         try:
             with open(self.settings_file, "r") as f:
                 self.previous_paths = json.load(f)
@@ -475,10 +1198,69 @@ class SyncApp(QMainWindow):
                 sync_direction = self.previous_paths.get("sync_direction")
                 if sync_direction:
                     self.sync_direction_dropdown.setCurrentText(sync_direction)
-                self.source_path.setText(self.previous_paths.get("source_path", ""))
-                self.dest_path.setText(self.previous_paths.get("dest_path", ""))
+
+                # Restore saved paths for this game with no destination selected yet
+                # (key = "{game}__")
+                key   = f"{game or ''}__"
+                saved = self.previous_paths.get("game_machine_paths", {}).get(key, {})
+                self.source_path.setText(saved.get("source_path",
+                    self.previous_paths.get("source_path", "")))
+                self.dest_path.setText(saved.get("dest_path",
+                    self.previous_paths.get("dest_path", "")))
+
+                # ── Cloud settings ────────────────────────────────────────────
+                cloud_enabled = self.previous_paths.get("cloud_enabled", False)
+                self.cloud_enabled_checkbox.setChecked(cloud_enabled)
+
+                provider_idx = self.previous_paths.get("cloud_provider_idx", 0)
+                btn = self.cloud_provider_group.button(provider_idx)
+                if btn:
+                    btn.setChecked(True)
+
+                self.cloud_folder_input.setText(self.previous_paths.get("cloud_folder", ""))
+
+                # Google Drive
+                self.gd_client_id_input.setText(self.previous_paths.get("gdrive_client_id", ""))
+                self.gd_client_secret_input.setText(self.previous_paths.get("gdrive_client_secret", ""))
+                if self.previous_paths.get("gdrive_token"):
+                    cid  = self.previous_paths.get("gdrive_client_id", "")
+                    csec = self.previous_paths.get("gdrive_client_secret", "")
+                    if GDRIVE_AVAILABLE and cid and csec:
+                        self.gdrive_sync = GoogleDriveSync(cid, csec, self.previous_paths["gdrive_token"])
+                        if self.gdrive_sync.is_authenticated():
+                            self.gd_status_label.setText("✓ Connected")
+                            self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+
+                # Dropbox
+                self.db_app_key_input.setText(self.previous_paths.get("dropbox_app_key", ""))
+                self.db_app_secret_input.setText(self.previous_paths.get("dropbox_app_secret", ""))
+                if self.previous_paths.get("dropbox_access_token"):
+                    self.dropbox_sync = DropboxSync(
+                        self.previous_paths.get("dropbox_app_key", ""),
+                        self.previous_paths.get("dropbox_app_secret", ""),
+                        self.previous_paths.get("dropbox_access_token", ""),
+                        self.previous_paths.get("dropbox_refresh_token", ""),
+                    )
+                    if self.dropbox_sync.is_authenticated():
+                        self.db_status_label.setText("✓ Connected")
+                        self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+
         except Exception as err:
             print(f"Could not load settings: {err}")
+        finally:
+            self._loading = False
+
+    def _game_machine_key(self) -> str:
+        """Unique key for the current (game, destination-MAC) combination."""
+        game = self.game_dropdown.currentText() or "__unknown__"
+        return f"{game}__{self._current_dest_mac}"
+
+    def _on_game_or_direction_changed(self):
+        """Called when the game or sync-direction dropdown changes."""
+        if getattr(self, "_loading", False):
+            return
+        self.update_paths()
+        self.save_settings()
 
     def update_paths(self):
         selected_game      = self.game_dropdown.currentText()
@@ -487,36 +1269,73 @@ class SyncApp(QMainWindow):
         if not selected_game:
             return
 
+        # 1. Start with game defaults
         defaults = self.game_defaults.get(selected_game, {})
         if selected_direction == "Linux ↔ Linux":
-            self.source_path.setText(defaults.get("linux", ""))
-            self.dest_path.setText(defaults.get("linux", ""))
+            src = defaults.get("linux", "")
+            dst = defaults.get("linux", "")
         elif selected_direction == "Linux ↔ Windows":
-            self.source_path.setText(defaults.get("linux", ""))
-            self.dest_path.setText(defaults.get("windows", ""))
+            src = defaults.get("linux", "")
+            dst = defaults.get("windows", "")
         elif selected_direction == "Windows ↔ Linux":
-            self.source_path.setText(defaults.get("windows", ""))
-            self.dest_path.setText(defaults.get("linux", ""))
+            src = defaults.get("windows", "")
+            dst = defaults.get("linux", "")
         elif selected_direction == "Windows ↔ Windows":
-            self.source_path.setText(defaults.get("windows", ""))
-            self.dest_path.setText(defaults.get("windows", ""))
+            src = defaults.get("windows", "")
+            dst = defaults.get("windows", "")
+        else:
+            src = dst = ""
 
-        # Restore any user-saved overrides
-        if self.previous_paths.get("source_path"):
-            self.source_path.setText(self.previous_paths["source_path"])
-        if self.previous_paths.get("dest_path"):
-            self.dest_path.setText(self.previous_paths["dest_path"])
+        # 2. Override with any saved paths for this specific game + destination machine
+        key   = self._game_machine_key()
+        saved = self.previous_paths.get("game_machine_paths", {}).get(key, {})
+        src   = saved.get("source_path", src)
+        dst   = saved.get("dest_path",   dst)
+
+        self.source_path.setText(src)
+        self.dest_path.setText(dst)
+
+        # Refresh cloud folder default whenever the game changes
+        self._refresh_cloud_folder_default()
 
     def save_settings(self):
-        settings = {
-            "game":           self.game_dropdown.currentText(),
-            "sync_direction": self.sync_direction_dropdown.currentText(),
+        if getattr(self, "_loading", False):
+            return
+
+        # Preserve all previously loaded keys (cloud tokens, etc.) then overlay
+        settings = dict(self.previous_paths)
+
+        settings["game"]           = self.game_dropdown.currentText()
+        settings["sync_direction"] = self.sync_direction_dropdown.currentText()
+
+        # ── Per-game + destination-machine path persistence ───────────────────
+        key = self._game_machine_key()
+        game_machine_paths = settings.get("game_machine_paths", {})
+        game_machine_paths[key] = {
             "source_path":    self.source_path.text(),
             "dest_path":      self.dest_path.text(),
+            "sync_direction": self.sync_direction_dropdown.currentText(),
         }
+        settings["game_machine_paths"] = game_machine_paths
+
+        # ── Last destination machine ──────────────────────────────────────────
+        if self._current_dest_mac:
+            settings["last_dest_mac"] = self._current_dest_mac
+            settings["last_dest_ip"]  = self._current_dest_ip
+
+        # ── Cloud UI state ────────────────────────────────────────────────────
+        settings["cloud_enabled"]      = self.cloud_enabled_checkbox.isChecked()
+        settings["cloud_provider_idx"] = self.cloud_provider_group.checkedId()
+        settings["cloud_folder"]       = self.cloud_folder_input.text()
+        settings["gdrive_client_id"]     = self.gd_client_id_input.text()
+        settings["gdrive_client_secret"] = self.gd_client_secret_input.text()
+        settings["dropbox_app_key"]      = self.db_app_key_input.text()
+        settings["dropbox_app_secret"]   = self.db_app_secret_input.text()
+
         try:
             with open(self.settings_file, "w") as f:
-                json.dump(settings, f)
+                json.dump(settings, f, indent=2)
+            self.previous_paths = settings
         except Exception as err:
             print(f"Could not save settings: {err}")
 
