@@ -203,6 +203,7 @@ class RcloneSync:
         self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None
     ):
         cfg = self._write_config()
+        local_path = str(Path(local_path).expanduser().resolve())
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         if on_line:
             on_line(f"[rclone upload] {local_path!r}  →  {remote!r}")
@@ -226,6 +227,7 @@ class RcloneSync:
         self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None
     ):
         cfg = self._write_config()
+        local_path = str(Path(local_path).expanduser().resolve())
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         Path(local_path).mkdir(parents=True, exist_ok=True)
         if on_line:
@@ -780,7 +782,11 @@ class LocalNetworkSync:
             if on_line:
                 on_line(msg)
 
-        lp = Path(local_path).expanduser()
+        lp = Path(
+            local_path
+            .replace("%USERPROFILE%", str(Path.home()))
+            .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+        ).expanduser().resolve()
         _log(f"[pull] remote={remote_path}  local={lp}")
         has_rsync = (
             subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
@@ -970,6 +976,14 @@ class SyncApp(QMainWindow):
         self.setup_darker_theme()
         self.init_ui()
         self.load_game_defaults()
+
+        # ── Cloud state (must be before load_settings so tokens are preserved) ──
+        self.rclone_gdrive: RcloneSync | None = None
+        self.rclone_dropbox: RcloneSync | None = None
+        self.local_network_sync: LocalNetworkSync | None = None
+        self.lm_password: str = ""
+        self.cloud_worker: CloudWorkerThread | None = None
+
         self.load_settings()
         self._apply_local_os_source_path()
 
@@ -996,13 +1010,6 @@ class SyncApp(QMainWindow):
             self.start_network_scan()
 
         self._last_game_selected = self.game_dropdown.currentText()
-
-        # ── Cloud state ───────────────────────────────────────────────────────
-        self.rclone_gdrive: RcloneSync | None = None
-        self.rclone_dropbox: RcloneSync | None = None
-        self.local_network_sync: LocalNetworkSync | None = None
-        self.lm_password: str = ""
-        self.cloud_worker: CloudWorkerThread | None = None
 
     # ── Window helpers ────────────────────────────────────────────────────────
 
@@ -1368,7 +1375,9 @@ class SyncApp(QMainWindow):
         lm_path_row.addWidget(lm_path_label)
         self.lm_remote_path_input = QLineEdit()
         self.lm_remote_path_input.setPlaceholderText(
-            "e.g.  `/home/pi/` or  `C:\\Users\\User\\`"
+            "e.g. /home/user/GameSync/"
+            if getattr(self, "lm_detected_os", "Linux") == "Linux"
+            else "e.g. C:\\Users\\User\\GameSync\\"
         )
         lm_path_row.addWidget(self.lm_remote_path_input)
         lm_layout.addLayout(lm_path_row)
@@ -2147,8 +2156,8 @@ class SyncApp(QMainWindow):
             if not getattr(self, "dest_password", ""):
                 return  # user cancelled password entry
 
-        local_path = src if operation == "push" else dest
-        remote_path = dest if operation == "push" else src
+        local_path = src
+        remote_path = dest
 
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
@@ -2651,7 +2660,7 @@ class SyncApp(QMainWindow):
                 # Auto-suggest username based on detected OS
                 if not self.lm_username_input.text():
                     self.lm_username_input.setPlaceholderText(
-                        "pi  (Raspberry Pi?)" if os_type == "Linux" else "Administrator"
+                        "user" if os_type == "Linux" else "windows_user_login"
                     )
                 break
         self._build_local_network_sync()
