@@ -990,6 +990,29 @@ class SyncApp(QMainWindow):
         cloud_layout = QVBoxLayout()
         cloud_layout.setSpacing(6)
 
+        # ── rclone availability banner ────────────────────────────────────────
+        self.rclone_banner = QFrame()
+        self.rclone_banner.setStyleSheet(
+            "QFrame { background: #3b2a00; border: 1px solid #a06000; border-radius: 4px; padding: 4px; margin-bottom: 6px; }"
+        )
+        _banner_row = QHBoxLayout()
+        _banner_row.setContentsMargins(1, 2, 1, 2)
+        _banner_icon = QLabel("⚠")
+        _banner_icon.setStyleSheet("color: #ffa500; font-size: 13px;")
+        _banner_row.addWidget(_banner_icon)
+        _banner_text = QLabel(
+            "<b>rclone is not installed.</b>  "
+            "Google Drive and Dropbox sync require rclone.  "
+            "<a href='https://rclone.org/install/' style='color:#ffa500;'>Download rclone.org/install</a>"
+        )
+        _banner_text.setOpenExternalLinks(True)
+        _banner_text.setStyleSheet("font-size: 10px; color: #ffd080; background: transparent; border: none;")
+        _banner_text.setWordWrap(True)
+        _banner_row.addWidget(_banner_text, 1)
+        self.rclone_banner.setLayout(_banner_row)
+        self.rclone_banner.setVisible(False)   # refreshed on show
+        cloud_layout.addWidget(self.rclone_banner)
+
         # Provider row
         provider_row = QHBoxLayout()
         provider_row.addWidget(QLabel("Provider:"))
@@ -1024,6 +1047,12 @@ class SyncApp(QMainWindow):
         self.gd_connect_btn.setFixedWidth(180)
         self.gd_connect_btn.clicked.connect(lambda: self._authorize_rclone("gdrive"))
         gd_btn_row.addWidget(self.gd_connect_btn)
+        self.gd_logout_btn = QPushButton("Log Out")
+        self.gd_logout_btn.setFixedWidth(70)
+        self.gd_logout_btn.setStyleSheet("color: #ff8080;")
+        self.gd_logout_btn.clicked.connect(lambda: self._logout_rclone("gdrive"))
+        self.gd_logout_btn.setVisible(False)
+        gd_btn_row.addWidget(self.gd_logout_btn)
         self.gd_status_label = QLabel("Not authorized")
         self.gd_status_label.setStyleSheet("font-size: 10px; color: gray;")
         gd_btn_row.addWidget(self.gd_status_label)
@@ -1053,6 +1082,12 @@ class SyncApp(QMainWindow):
         self.db_connect_btn.setFixedWidth(180)
         self.db_connect_btn.clicked.connect(lambda: self._authorize_rclone("dropbox"))
         db_btn_row.addWidget(self.db_connect_btn)
+        self.db_logout_btn = QPushButton("Log Out")
+        self.db_logout_btn.setFixedWidth(70)
+        self.db_logout_btn.setStyleSheet("color: #ff8080;")
+        self.db_logout_btn.clicked.connect(lambda: self._logout_rclone("dropbox"))
+        self.db_logout_btn.setVisible(False)
+        db_btn_row.addWidget(self.db_logout_btn)
         self.db_status_label = QLabel("Not authorized")
         self.db_status_label.setStyleSheet("font-size: 10px; color: gray;")
         db_btn_row.addWidget(self.db_status_label)
@@ -1387,7 +1422,7 @@ class SyncApp(QMainWindow):
             " font-family: monospace; font-size: 11px; border: 1px solid #444; }"
         )
         # ~5 lines tall as default (line height ≈ 18px + padding)
-        self.sync_log.setMinimumHeight(108)
+        self.sync_log.setMinimumHeight(180)
         log_vbox.addWidget(self.sync_log)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
@@ -1405,6 +1440,8 @@ class SyncApp(QMainWindow):
 
     def toggle_cloud_section(self, enabled: bool):
         self.cloud_section.setVisible(enabled)
+        if enabled:
+            self._refresh_rclone_banner()
         # When cloud is active, hide direct-machine buttons; when not, hide cloud buttons
         cloud_on = enabled
         dest_selected = bool(self._current_dest_mac or self._current_dest_ip)
@@ -1442,6 +1479,7 @@ class SyncApp(QMainWindow):
         if btn_id == 3 and self.lm_host_dropdown.count() <= 1 and not getattr(self, 'scan_active', False):
             self.start_network_scan()
         self._refresh_local_machine_scan_state()
+        self._refresh_rclone_banner()
 
     def _refresh_cloud_folder_default(self):
         """Populate cloud folder with a game-specific saved path or default value."""
@@ -1761,9 +1799,45 @@ class SyncApp(QMainWindow):
     def _on_rclone_authorized(self, provider: str):
         status_label = self.gd_status_label if provider == "gdrive" else self.db_status_label
         connect_btn  = self.gd_connect_btn  if provider == "gdrive" else self.db_connect_btn
+        logout_btn   = self.gd_logout_btn   if provider == "gdrive" else self.db_logout_btn
         connect_btn.setEnabled(True)
+        connect_btn.setText("Re-authorize")
+        logout_btn.setVisible(True)
         status_label.setText("✓ Authorized")
         status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+
+    def _logout_rclone(self, provider: str):
+        """Clear stored token and reset auth state for the given provider."""
+        if provider == "gdrive":
+            self.rclone_gdrive = None
+            self.previous_paths.pop("rclone_gdrive_token", None)
+            status_label = self.gd_status_label
+            connect_btn  = self.gd_connect_btn
+            logout_btn   = self.gd_logout_btn
+        else:
+            self.rclone_dropbox = None
+            self.previous_paths.pop("rclone_dropbox_token", None)
+            status_label = self.db_status_label
+            connect_btn  = self.db_connect_btn
+            logout_btn   = self.db_logout_btn
+        # Delete the rclone config file for this provider
+        cfg_path = Path.home() / ".config" / "game-sync-tool" / f"rclone_{provider}.conf"
+        try:
+            cfg_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self.save_settings()
+        logout_btn.setVisible(False)
+        connect_btn.setText("Authorize Google Drive" if provider == "gdrive" else "Authorize Dropbox")
+        status_label.setText("Not authorized")
+        status_label.setStyleSheet("font-size: 10px; color: gray;")
+
+    def _refresh_rclone_banner(self):
+        """Show the rclone-not-found banner only when relevant providers are selected."""
+        rclone_missing  = not shutil.which("rclone")
+        btn_id          = self.cloud_provider_group.checkedId()  # 0=GDrive,1=Dropbox,2=Both,3=Local
+        needs_rclone    = btn_id in (0, 1, 2)  # not Local Network
+        self.rclone_banner.setVisible(rclone_missing and needs_rclone)
 
     def _on_rclone_auth_error(self, provider: str, msg: str):
         status_label = self.gd_status_label if provider == "gdrive" else self.db_status_label
@@ -2349,12 +2423,16 @@ class SyncApp(QMainWindow):
                     self.rclone_gdrive = RcloneSync("gdrive", self.previous_paths["rclone_gdrive_token"])
                     self.gd_status_label.setText("✓ Authorized")
                     self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+                    self.gd_logout_btn.setVisible(True)
+                    self.gd_connect_btn.setText("Re-authorize")
 
                 # Dropbox (via rclone)
                 if self.previous_paths.get("rclone_dropbox_token"):
                     self.rclone_dropbox = RcloneSync("dropbox", self.previous_paths["rclone_dropbox_token"])
                     self.db_status_label.setText("✓ Authorized")
                     self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+                    self.db_logout_btn.setVisible(True)
+                    self.db_connect_btn.setText("Re-authorize")
 
                 # Local network machine
                 self.lm_username_input.setText(self.previous_paths.get("lm_username", ""))
