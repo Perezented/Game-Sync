@@ -19,22 +19,11 @@ import platform
 import webbrowser
 import urllib.parse
 
-# ── Optional cloud dependencies (installed separately) ────────────────────────
-try:
-    from googleapiclient.discovery import build as gdrive_build
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from google.oauth2.credentials import Credentials as GCredentials
-    from google.auth.transport.requests import Request as GRequest
-    GDRIVE_AVAILABLE = True
-except ImportError:
-    GDRIVE_AVAILABLE = False
+import shutil
 
-try:
-    import dropbox as _dropbox_module
-    from dropbox import DropboxOAuth2FlowNoRedirect
-    DROPBOX_AVAILABLE = True
-except ImportError:
-    DROPBOX_AVAILABLE = False
+# ── rclone handles GDrive + Dropbox without developer accounts ───────────────
+# Install from https://rclone.org/install/
+RCLONE_AVAILABLE = bool(shutil.which("rclone"))
 
 try:
     import paramiko
@@ -135,237 +124,75 @@ class NetworkScanner(QThread):
 
 # ── Google Drive helper ───────────────────────────────────────────────────────
 
-class GoogleDriveSync:
-    """Thin wrapper around the Google Drive v3 REST API."""
+class RcloneSync:
+    """Cloud sync for Google Drive and Dropbox via rclone.
 
-    SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+    No developer accounts needed — rclone uses its own bundled OAuth credentials.
+    Users authorize once via their browser (Google/Dropbox account login).
+    Install rclone from: https://rclone.org/install/
+    """
 
-    def __init__(self, client_id: str, client_secret: str, token_data: dict | None = None):
-        self.client_id     = client_id
-        self.client_secret = client_secret
-        self.creds         = None
-        if token_data and GDRIVE_AVAILABLE:
-            try:
-                self.creds = GCredentials.from_authorized_user_info(token_data, self.SCOPES)
-            except Exception:
-                self.creds = None
+    PROVIDER_TYPE = {"gdrive": "drive", "dropbox": "dropbox"}
 
-    # ── Auth ──────────────────────────────────────────────────────────────────
-
-    def authenticate(self) -> dict:
-        """Run the local-server OAuth flow. Returns serialisable token dict."""
-        if not GDRIVE_AVAILABLE:
-            raise RuntimeError(
-                "google-api-python-client is not installed.\n"
-                "Run:  pip install google-api-python-client google-auth-oauthlib"
-            )
-        client_config = {
-            "installed": {
-                "client_id":      self.client_id,
-                "client_secret":  self.client_secret,
-                "auth_uri":       "https://accounts.google.com/o/oauth2/auth",
-                "token_uri":      "https://oauth2.googleapis.com/token",
-                "redirect_uris":  ["http://localhost"],
-            }
-        }
-        flow       = InstalledAppFlow.from_client_config(client_config, self.SCOPES)
-        self.creds = flow.run_local_server(port=0)
-        return json.loads(self.creds.to_json())
+    def __init__(self, provider: str, token_json: str = ""):
+        self.provider   = provider   # "gdrive" or "dropbox"
+        self.token_json = token_json # JSON string of the rclone token
 
     def is_authenticated(self) -> bool:
-        if not self.creds or not GDRIVE_AVAILABLE:
-            return False
-        if self.creds.expired and self.creds.refresh_token:
-            try:
-                self.creds.refresh(GRequest())
-            except Exception:
-                return False
-        return self.creds.valid
+        return bool(self.token_json)
 
-    def refreshed_token(self) -> dict | None:
-        """Return the (potentially refreshed) token as a dict, or None."""
-        if self.creds and GDRIVE_AVAILABLE:
-            return json.loads(self.creds.to_json())
-        return None
+    def _config_path(self) -> Path:
+        cfg_dir = Path.home() / ".config" / "game-sync-tool"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        return cfg_dir / f"rclone_{self.provider}.conf"
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _service(self):
-        return gdrive_build("drive", "v3", credentials=self.creds)
-
-    def _get_or_create_folder(self, svc, folder_path: str, parent_id: str = "root") -> str:
-        parts = [p for p in folder_path.strip("/").split("/") if p]
-        for part in parts:
-            q       = (f"name='{part}' and "
-                       f"mimeType='application/vnd.google-apps.folder' and "
-                       f"'{parent_id}' in parents and trashed=false")
-            results = svc.files().list(q=q, fields="files(id)").execute()
-            files   = results.get("files", [])
-            if files:
-                parent_id = files[0]["id"]
-            else:
-                meta      = {"name": part,
-                             "mimeType": "application/vnd.google-apps.folder",
-                             "parents": [parent_id]}
-                parent_id = svc.files().create(body=meta, fields="id").execute()["id"]
-        return parent_id
-
-    def _upload_file(self, svc, file_path: Path, folder_id: str):
-        from googleapiclient.http import MediaFileUpload  # noqa: PLC0415
-        q       = f"name='{file_path.name}' and '{folder_id}' in parents and trashed=false"
-        results = svc.files().list(q=q, fields="files(id)").execute()
-        files   = results.get("files", [])
-        media   = MediaFileUpload(str(file_path), resumable=True)
-        if files:
-            svc.files().update(fileId=files[0]["id"], media_body=media).execute()
-        else:
-            meta = {"name": file_path.name, "parents": [folder_id]}
-            svc.files().create(body=meta, media_body=media).execute()
-
-    def _download_folder(self, svc, folder_id: str, local_dir: Path):
-        import io  # noqa: PLC0415
-        from googleapiclient.http import MediaIoBaseDownload  # noqa: PLC0415
-        results = svc.files().list(
-            q=f"'{folder_id}' in parents and trashed=false",
-            fields="files(id, name, mimeType)"
-        ).execute()
-        for item in results.get("files", []):
-            if item["mimeType"] == "application/vnd.google-apps.folder":
-                sub = local_dir / item["name"]
-                sub.mkdir(exist_ok=True)
-                self._download_folder(svc, item["id"], sub)
-            else:
-                request = svc.files().get_media(fileId=item["id"])
-                buf     = io.BytesIO()
-                dl      = MediaIoBaseDownload(buf, request)
-                done    = False
-                while not done:
-                    _, done = dl.next_chunk()
-                (local_dir / item["name"]).write_bytes(buf.getvalue())
-
-    # ── Public upload / download ──────────────────────────────────────────────
-
-    def upload(self, local_path: str | Path, cloud_folder: str):
-        svc       = self._service()
-        folder_id = self._get_or_create_folder(svc, cloud_folder)
-        lp        = Path(local_path)
-        if lp.is_file():
-            self._upload_file(svc, lp, folder_id)
-        elif lp.is_dir():
-            for f in lp.rglob("*"):
-                if f.is_file():
-                    rel       = f.relative_to(lp.parent)
-                    sub_path  = cloud_folder.rstrip("/") + "/" + "/".join(rel.parts[:-1])
-                    sub_id    = self._get_or_create_folder(svc, sub_path) if rel.parts[:-1] else folder_id
-                    self._upload_file(svc, f, sub_id)
-
-    def download(self, cloud_folder: str, local_path: str | Path):
-        svc       = self._service()
-        folder_id = self._get_or_create_folder(svc, cloud_folder)
-        lp        = Path(local_path)
-        lp.mkdir(parents=True, exist_ok=True)
-        self._download_folder(svc, folder_id, lp)
-
-
-# ── Dropbox helper ────────────────────────────────────────────────────────────
-
-class DropboxSync:
-    """OAuth2 Dropbox client (offline refresh token so it survives app restarts)."""
-
-    def __init__(self, app_key: str, app_secret: str,
-                 access_token: str = "", refresh_token: str = ""):
-        self.app_key       = app_key
-        self.app_secret    = app_secret
-        self.access_token  = access_token
-        self.refresh_token = refresh_token
-        self._auth_flow    = None
-        self._dbx          = None
-
-    # ── Auth ──────────────────────────────────────────────────────────────────
-
-    def get_auth_url(self) -> str:
-        """Start PKCE flow and return the authorisation URL the user should open."""
-        if not DROPBOX_AVAILABLE:
-            raise RuntimeError(
-                "dropbox package is not installed.\n"
-                "Run:  pip install dropbox"
-            )
-        self._auth_flow = DropboxOAuth2FlowNoRedirect(
-            self.app_key,
-            consumer_secret    = self.app_secret,
-            token_access_type  = "offline",
+    def _write_config(self) -> Path:
+        cfg   = self._config_path()
+        rtype = self.PROVIDER_TYPE.get(self.provider, self.provider)
+        cfg.write_text(
+            f"[{self.provider}]\ntype = {rtype}\ntoken = {self.token_json}\n",
+            encoding="utf-8",
         )
-        return self._auth_flow.start()
+        return cfg
 
-    def finish_auth(self, code: str) -> dict:
-        """Exchange the user-pasted code for tokens. Returns token dict."""
-        if not self._auth_flow:
-            raise RuntimeError("Call get_auth_url() first.")
-        result             = self._auth_flow.finish(code.strip())
-        self.access_token  = result.access_token
-        self.refresh_token = getattr(result, "refresh_token", "")
-        self._dbx          = None  # force re-init
-        return {"access_token": self.access_token, "refresh_token": self.refresh_token}
+    def _run(self, cmd, on_line=None, on_proc=None, cancelled=None):
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        if on_proc:
+            on_proc(proc)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line and on_line:
+                on_line(line)
+            if cancelled and cancelled():
+                proc.kill()
+                return
+        proc.wait()
+        if proc.returncode != 0 and not (cancelled and cancelled()):
+            raise RuntimeError(f"rclone exited with code {proc.returncode}")
 
-    def is_authenticated(self) -> bool:
-        return bool(self.access_token)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _get_dbx(self):
-        if not self._dbx:
-            kwargs = dict(app_key=self.app_key, app_secret=self.app_secret)
-            if self.refresh_token:
-                kwargs["oauth2_access_token"]  = self.access_token
-                kwargs["oauth2_refresh_token"] = self.refresh_token
-            else:
-                kwargs["oauth2_access_token"] = self.access_token
-            self._dbx = _dropbox_module.Dropbox(**kwargs)
-        return self._dbx
-
-    def _upload_file(self, dbx, file_path: Path, cloud_path: str):
-        with open(file_path, "rb") as fh:
-            data = fh.read()
-        dbx.files_upload(
-            data, cloud_path,
-            mode=_dropbox_module.files.WriteMode.overwrite
+    def upload(self, local_path, cloud_folder,
+               on_line=None, on_proc=None, cancelled=None):
+        cfg    = self._write_config()
+        remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+        self._run(
+            ["rclone", "copy", "--config", str(cfg),
+             str(local_path), remote, "--stats-one-line-date"],
+            on_line, on_proc, cancelled,
         )
 
-    def _download_folder_entries(self, dbx, result, local_dir: Path):
-        for entry in result.entries:
-            if isinstance(entry, _dropbox_module.files.FolderMetadata):
-                sub = local_dir / entry.name
-                sub.mkdir(exist_ok=True)
-                sub_result = dbx.files_list_folder(entry.path_lower)
-                self._download_folder_entries(dbx, sub_result, sub)
-            elif isinstance(entry, _dropbox_module.files.FileMetadata):
-                _, resp = dbx.files_download(entry.path_lower)
-                (local_dir / entry.name).write_bytes(resp.content)
-        if result.has_more:
-            more = dbx.files_list_folder_continue(result.cursor)
-            self._download_folder_entries(dbx, more, local_dir)
-
-    # ── Public upload / download ──────────────────────────────────────────────
-
-    def upload(self, local_path: str | Path, cloud_folder: str):
-        dbx          = self._get_dbx()
-        cloud_folder = cloud_folder.rstrip("/")
-        lp           = Path(local_path)
-        if lp.is_file():
-            self._upload_file(dbx, lp, f"{cloud_folder}/{lp.name}")
-        elif lp.is_dir():
-            for f in lp.rglob("*"):
-                if f.is_file():
-                    rel  = f.relative_to(lp.parent)
-                    dest = f"{cloud_folder}/{'/'.join(rel.parts)}"
-                    self._upload_file(dbx, f, dest)
-
-    def download(self, cloud_folder: str, local_path: str | Path):
-        dbx    = self._get_dbx()
-        lp     = Path(local_path)
-        lp.mkdir(parents=True, exist_ok=True)
-        result = dbx.files_list_folder(cloud_folder.rstrip("/"))
-        self._download_folder_entries(dbx, result, lp)
+    def download(self, cloud_folder, local_path,
+                 on_line=None, on_proc=None, cancelled=None):
+        cfg    = self._write_config()
+        remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        self._run(
+            ["rclone", "copy", "--config", str(cfg),
+             remote, str(local_path), "--stats-one-line-date"],
+            on_line, on_proc, cancelled,
+        )
 
 
 # ── Background thread for cloud operations ────────────────────────────────────
@@ -432,14 +259,30 @@ class CloudWorkerThread(QThread):
                         self.finished.emit(True, "Download complete.")
                 return
 
-            # ── Google Drive / Dropbox: standard upload / download ──────────
-            self.progress.emit(f"{self.operation.title()}ing to/from cloud…")
+            # ── RcloneSync (GDrive/Dropbox): streaming output + cancel support ──
+            self.progress.emit(f"{self.operation.title()}ing via cloud…")
             if self.operation == "upload":
-                self.sync_obj.upload(self.local_path, self.cloud_folder)
-                self.finished.emit(True, "Upload complete.")
+                self.sync_obj.upload(
+                    self.local_path, self.cloud_folder,
+                    on_line=self.progress.emit,
+                    on_proc=self._store_proc,
+                    cancelled=lambda: self._cancelled,
+                )
+                if self._cancelled:
+                    self.finished.emit(False, "Cancelled.")
+                else:
+                    self.finished.emit(True, "Upload complete.")
             else:
-                self.sync_obj.download(self.cloud_folder, self.local_path)
-                self.finished.emit(True, "Download complete.")
+                self.sync_obj.download(
+                    self.cloud_folder, self.local_path,
+                    on_line=self.progress.emit,
+                    on_proc=self._store_proc,
+                    cancelled=lambda: self._cancelled,
+                )
+                if self._cancelled:
+                    self.finished.emit(False, "Cancelled.")
+                else:
+                    self.finished.emit(True, "Download complete.")
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -908,6 +751,11 @@ class ConnectionTestThread(QThread):
 
 class SyncApp(QMainWindow):
 
+    # Signals emitted from rclone auth worker thread → main thread
+    _rclone_auth_ok    = pyqtSignal(str)        # provider
+    _rclone_auth_err   = pyqtSignal(str, str)   # provider, message
+    _rclone_auth_token = pyqtSignal(str, str)   # provider, token_json
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Game Sync Tool")
@@ -915,6 +763,11 @@ class SyncApp(QMainWindow):
 
         self.settings_file  = self.get_settings_file_path()
         self.game_defaults  = {}
+
+        # Wire rclone auth signals (must be done before init_ui)
+        self._rclone_auth_token.connect(self._apply_rclone_token)
+        self._rclone_auth_ok.connect(self._on_rclone_authorized)
+        self._rclone_auth_err.connect(self._on_rclone_auth_error)
         self.previous_paths = {}
         self.scanned_hosts  = []  # list of (ip, os_type, label, mac, is_local)
         self._current_dest_mac = ""   # MAC of currently-selected destination
@@ -957,8 +810,8 @@ class SyncApp(QMainWindow):
         self._last_game_selected = self.game_dropdown.currentText()
 
         # ── Cloud state ───────────────────────────────────────────────────────
-        self.gdrive_sync:       GoogleDriveSync    | None = None
-        self.dropbox_sync:      DropboxSync        | None = None
+        self.rclone_gdrive:     RcloneSync         | None = None
+        self.rclone_dropbox:    RcloneSync         | None = None
         self.local_network_sync: LocalNetworkSync  | None = None
         self.lm_password:       str               = ""
         self.cloud_worker:      CloudWorkerThread  | None = None
@@ -1162,46 +1015,16 @@ class SyncApp(QMainWindow):
         gd_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
         gd_layout.addWidget(gd_header)
 
-        auth_method_row = QHBoxLayout()
-        auth_method_row.addWidget(QLabel("Auth method:"))
-        self.gd_auth_group = QButtonGroup(self)
-        self.gd_oauth_rb    = QRadioButton("OAuth (browser)")
-        self.gd_manual_rb   = QRadioButton("Client ID + Secret")
-        self.gd_oauth_rb.setChecked(True)
-        self.gd_auth_group.addButton(self.gd_oauth_rb, 0)
-        self.gd_auth_group.addButton(self.gd_manual_rb, 1)
-        self.gd_auth_group.idToggled.connect(self.on_gd_auth_method_changed)
-        auth_method_row.addWidget(self.gd_oauth_rb)
-        auth_method_row.addWidget(self.gd_manual_rb)
-        auth_method_row.addStretch()
-        gd_layout.addLayout(auth_method_row)
-
-        self.gd_credentials_widget = QWidget()
-        gd_cred_layout = QVBoxLayout()
-        gd_cred_layout.setContentsMargins(0, 0, 0, 0)
-        gd_cid_row = QHBoxLayout()
-        gd_cid_row.addWidget(QLabel("Client ID:"))
-        self.gd_client_id_input = QLineEdit()
-        self.gd_client_id_input.setPlaceholderText("Paste Google OAuth client ID")
-        gd_cid_row.addWidget(self.gd_client_id_input)
-        gd_cred_layout.addLayout(gd_cid_row)
-        gd_csec_row = QHBoxLayout()
-        gd_csec_row.addWidget(QLabel("Client Secret:"))
-        self.gd_client_secret_input = QLineEdit()
-        self.gd_client_secret_input.setPlaceholderText("Paste Google OAuth client secret")
-        self.gd_client_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-        gd_csec_row.addWidget(self.gd_client_secret_input)
-        gd_cred_layout.addLayout(gd_csec_row)
-        self.gd_credentials_widget.setLayout(gd_cred_layout)
-        self.gd_credentials_widget.setVisible(False)
-        gd_layout.addWidget(self.gd_credentials_widget)
+        gd_note = QLabel("Sign in with your Google account — no developer setup required.")
+        gd_note.setStyleSheet("font-size: 10px; color: #aaa;")
+        gd_layout.addWidget(gd_note)
 
         gd_btn_row = QHBoxLayout()
-        self.gd_connect_btn = QPushButton("Connect Google Drive")
+        self.gd_connect_btn = QPushButton("Authorize Google Drive")
         self.gd_connect_btn.setFixedWidth(180)
-        self.gd_connect_btn.clicked.connect(self.connect_gdrive)
+        self.gd_connect_btn.clicked.connect(lambda: self._authorize_rclone("gdrive"))
         gd_btn_row.addWidget(self.gd_connect_btn)
-        self.gd_status_label = QLabel("Not connected")
+        self.gd_status_label = QLabel("Not authorized")
         self.gd_status_label.setStyleSheet("font-size: 10px; color: gray;")
         gd_btn_row.addWidget(self.gd_status_label)
         gd_btn_row.addStretch()
@@ -1221,42 +1044,20 @@ class SyncApp(QMainWindow):
         db_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
         db_layout.addWidget(db_header)
 
-        db_key_row = QHBoxLayout()
-        db_key_row.addWidget(QLabel("App Key:"))
-        self.db_app_key_input = QLineEdit()
-        self.db_app_key_input.setPlaceholderText("Dropbox App Key")
-        db_key_row.addWidget(self.db_app_key_input)
-        db_layout.addLayout(db_key_row)
+        db_note = QLabel("Sign in with your Dropbox account — no developer setup required.")
+        db_note.setStyleSheet("font-size: 10px; color: #aaa;")
+        db_layout.addWidget(db_note)
 
-        db_sec_row = QHBoxLayout()
-        db_sec_row.addWidget(QLabel("App Secret:"))
-        self.db_app_secret_input = QLineEdit()
-        self.db_app_secret_input.setPlaceholderText("Dropbox App Secret")
-        self.db_app_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
-        db_sec_row.addWidget(self.db_app_secret_input)
-        db_layout.addLayout(db_sec_row)
-
-        db_auth_row = QHBoxLayout()
-        self.db_get_url_btn = QPushButton("1. Open Auth URL")
-        self.db_get_url_btn.setFixedWidth(140)
-        self.db_get_url_btn.clicked.connect(self.dropbox_open_auth_url)
-        db_auth_row.addWidget(self.db_get_url_btn)
-        db_auth_row.addSpacing(8)
-        self.db_code_input = QLineEdit()
-        self.db_code_input.setPlaceholderText("2. Paste authorisation code here")
-        db_auth_row.addWidget(self.db_code_input)
-        self.db_finish_btn = QPushButton("3. Finish Auth")
-        self.db_finish_btn.setFixedWidth(100)
-        self.db_finish_btn.clicked.connect(self.dropbox_finish_auth)
-        db_auth_row.addWidget(self.db_finish_btn)
-        db_layout.addLayout(db_auth_row)
-
-        db_status_row = QHBoxLayout()
-        self.db_status_label = QLabel("Not connected")
+        db_btn_row = QHBoxLayout()
+        self.db_connect_btn = QPushButton("Authorize Dropbox")
+        self.db_connect_btn.setFixedWidth(180)
+        self.db_connect_btn.clicked.connect(lambda: self._authorize_rclone("dropbox"))
+        db_btn_row.addWidget(self.db_connect_btn)
+        self.db_status_label = QLabel("Not authorized")
         self.db_status_label.setStyleSheet("font-size: 10px; color: gray;")
-        db_status_row.addWidget(self.db_status_label)
-        db_status_row.addStretch()
-        db_layout.addLayout(db_status_row)
+        db_btn_row.addWidget(self.db_status_label)
+        db_btn_row.addStretch()
+        db_layout.addLayout(db_btn_row)
 
         self.dropbox_section.setLayout(db_layout)
         cloud_layout.addWidget(self.dropbox_section)
@@ -1642,11 +1443,6 @@ class SyncApp(QMainWindow):
             self.start_network_scan()
         self._refresh_local_machine_scan_state()
 
-    def on_gd_auth_method_changed(self, btn_id: int, checked: bool):
-        if not checked:
-            return
-        self.gd_credentials_widget.setVisible(btn_id == 1)  # 1 = manual creds
-
     def _refresh_cloud_folder_default(self):
         """Populate cloud folder with a game-specific saved path or default value."""
         game = self.game_dropdown.currentText() or "Game"
@@ -1905,108 +1701,76 @@ class SyncApp(QMainWindow):
 
     # ── Google Drive auth ─────────────────────────────────────────────────────
 
-    def connect_gdrive(self):
-        client_id     = self.gd_client_id_input.text().strip()
-        client_secret = self.gd_client_secret_input.text().strip()
-
-        if not GDRIVE_AVAILABLE:
-            self.gd_status_label.setText("Missing: install google-api-python-client google-auth-oauthlib")
-            self.gd_status_label.setStyleSheet("font-size: 10px; color: red;")
-            return
-
-        # For OAuth mode the user may leave cred fields blank (env creds)
-        if self.gd_manual_rb.isChecked() and (not client_id or not client_secret):
-            self.gd_status_label.setText("Enter Client ID + Secret first.")
-            self.gd_status_label.setStyleSheet("font-size: 10px; color: orange;")
-            return
-
-        self.gd_connect_btn.setEnabled(False)
-        self.gd_status_label.setText("Opening browser…")
-        self.gd_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
-
-        saved         = self.previous_paths.get("gdrive_token")
-        self.gdrive_sync = GoogleDriveSync(client_id, client_secret, saved)
-
-        if self.gdrive_sync.is_authenticated():
-            self._on_gdrive_connected()
-            return
-
-        # Run OAuth in a thread so the UI stays responsive
+    def _authorize_rclone(self, provider: str):
+        """Run 'rclone authorize' for the given provider. Opens browser, captures token."""
         import threading  # noqa: PLC0415
+        import re as _re  # noqa: PLC0415
+        status_label = self.gd_status_label if provider == "gdrive" else self.db_status_label
+        connect_btn  = self.gd_connect_btn  if provider == "gdrive" else self.db_connect_btn
+        rclone_type  = "drive" if provider == "gdrive" else "dropbox"
+
+        if not shutil.which("rclone"):
+            status_label.setText("rclone not found — install from rclone.org")
+            status_label.setStyleSheet("font-size: 10px; color: red;")
+            return
+
+        connect_btn.setEnabled(False)
+        status_label.setText("Opening browser… waiting for authorization…")
+        status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+
+        # Capture loop variables for thread closure
+        _provider     = provider
+        _rclone_type  = rclone_type
+
         def _run():
             try:
-                token = self.gdrive_sync.authenticate()
-                self.previous_paths["gdrive_token"]          = token
-                self.previous_paths["gdrive_client_id"]      = client_id
-                self.previous_paths["gdrive_client_secret"]  = client_secret
-                self.save_settings()
-                # Signal back to main thread
-                QTimer.singleShot(0, self._on_gdrive_connected)
+                result = subprocess.run(
+                    ["rclone", "authorize", _rclone_type, "--auth-no-open-browser=false"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                output = result.stdout + result.stderr
+                # Robust extraction: split on the "--->"/"<---End paste" markers
+                if "---" + ">" in output and "<---End paste" in output:
+                    token_json = output.split("---" + ">", 1)[1].split("<---End paste", 1)[0].strip()
+                else:
+                    # Fallback: try regex for slightly different rclone output formats
+                    m = _re.search(r"--->(\s*\{.*?\}\s*)<---End paste", output, _re.DOTALL)
+                    if m:
+                        token_json = m.group(1).strip()
+                    else:
+                        raise RuntimeError(
+                            f"Could not parse rclone token.\nOutput was:\n{output[-300:]}"
+                        )
+                self._rclone_auth_token.emit(_provider, token_json)
             except Exception as exc:
-                msg = str(exc)
-                QTimer.singleShot(0, lambda: self._on_gdrive_error(msg))
+                self._rclone_auth_err.emit(_provider, str(exc)[:200])
+
         threading.Thread(target=_run, daemon=True).start()
 
-    def _on_gdrive_connected(self):
-        self.gd_connect_btn.setEnabled(True)
-        self.gd_status_label.setText("✓ Connected")
-        self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
-        # Refresh token in case it was refreshed
-        if self.gdrive_sync:
-            new_token = self.gdrive_sync.refreshed_token()
-            if new_token:
-                self.previous_paths["gdrive_token"] = new_token
-                self.save_settings()
+    def _apply_rclone_token(self, provider: str, token_json: str):
+        """Called on main thread via signal after successful rclone authorize."""
+        if provider == "gdrive":
+            self.rclone_gdrive = RcloneSync("gdrive", token_json)
+            self.previous_paths["rclone_gdrive_token"] = token_json
+        else:
+            self.rclone_dropbox = RcloneSync("dropbox", token_json)
+            self.previous_paths["rclone_dropbox_token"] = token_json
+        self.save_settings()
+        self._rclone_auth_ok.emit(provider)
 
-    def _on_gdrive_error(self, msg: str):
-        self.gd_connect_btn.setEnabled(True)
-        self.gd_status_label.setText(f"Error: {msg[:60]}")
-        self.gd_status_label.setStyleSheet("font-size: 10px; color: red;")
+    def _on_rclone_authorized(self, provider: str):
+        status_label = self.gd_status_label if provider == "gdrive" else self.db_status_label
+        connect_btn  = self.gd_connect_btn  if provider == "gdrive" else self.db_connect_btn
+        connect_btn.setEnabled(True)
+        status_label.setText("✓ Authorized")
+        status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
 
-    # ── Dropbox auth ──────────────────────────────────────────────────────────
-
-    def dropbox_open_auth_url(self):
-        if not DROPBOX_AVAILABLE:
-            self.db_status_label.setText("Missing: install dropbox")
-            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
-            return
-        app_key    = self.db_app_key_input.text().strip()
-        app_secret = self.db_app_secret_input.text().strip()
-        if not app_key or not app_secret:
-            self.db_status_label.setText("Enter App Key + Secret first.")
-            self.db_status_label.setStyleSheet("font-size: 10px; color: orange;")
-            return
-        try:
-            self.dropbox_sync = DropboxSync(app_key, app_secret)
-            url = self.dropbox_sync.get_auth_url()
-            webbrowser.open(url)
-            self.db_status_label.setText("Browser opened — paste the code and click Finish Auth.")
-            self.db_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
-        except Exception as exc:
-            self.db_status_label.setText(str(exc)[:80])
-            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
-
-    def dropbox_finish_auth(self):
-        code = self.db_code_input.text().strip()
-        if not code:
-            self.db_status_label.setText("Paste the authorisation code first.")
-            return
-        if not self.dropbox_sync:
-            self.db_status_label.setText("Click 'Open Auth URL' first.")
-            return
-        try:
-            tokens = self.dropbox_sync.finish_auth(code)
-            self.previous_paths["dropbox_access_token"]  = tokens["access_token"]
-            self.previous_paths["dropbox_refresh_token"] = tokens.get("refresh_token", "")
-            self.previous_paths["dropbox_app_key"]       = self.db_app_key_input.text().strip()
-            self.previous_paths["dropbox_app_secret"]    = self.db_app_secret_input.text().strip()
-            self.save_settings()
-            self.db_status_label.setText("✓ Connected")
-            self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
-            self.db_code_input.clear()
-        except Exception as exc:
-            self.db_status_label.setText(f"Error: {exc}")
-            self.db_status_label.setStyleSheet("font-size: 10px; color: red;")
+    def _on_rclone_auth_error(self, provider: str, msg: str):
+        status_label = self.gd_status_label if provider == "gdrive" else self.db_status_label
+        connect_btn  = self.gd_connect_btn  if provider == "gdrive" else self.db_connect_btn
+        connect_btn.setEnabled(True)
+        status_label.setText(f"Error: {msg}")
+        status_label.setStyleSheet("font-size: 10px; color: red;")
 
     # ── Cloud push / pull ─────────────────────────────────────────────────────
 
@@ -2014,10 +1778,10 @@ class SyncApp(QMainWindow):
         """Return whichever cloud sync objects are ready based on selected provider."""
         btn_id  = self.cloud_provider_group.checkedId()  # 0=GDrive, 1=Dropbox, 2=Both, 3=Local
         objects = []
-        if btn_id in (0, 2) and self.gdrive_sync and self.gdrive_sync.is_authenticated():
-            objects.append(("Google Drive", self.gdrive_sync))
-        if btn_id in (1, 2) and self.dropbox_sync and self.dropbox_sync.is_authenticated():
-            objects.append(("Dropbox", self.dropbox_sync))
+        if btn_id in (0, 2) and self.rclone_gdrive and self.rclone_gdrive.is_authenticated():
+            objects.append(("Google Drive", self.rclone_gdrive))
+        if btn_id in (1, 2) and self.rclone_dropbox and self.rclone_dropbox.is_authenticated():
+            objects.append(("Dropbox", self.rclone_dropbox))
         if btn_id == 3 and self.local_network_sync and self.local_network_sync.is_authenticated():
             objects.append(("Local Machine", self.local_network_sync))
         return objects
@@ -2580,31 +2344,17 @@ class SyncApp(QMainWindow):
                 self._refresh_cloud_folder_default()
                 self._last_game_selected = self.game_dropdown.currentText()
 
-                # Google Drive
-                self.gd_client_id_input.setText(self.previous_paths.get("gdrive_client_id", ""))
-                self.gd_client_secret_input.setText(self.previous_paths.get("gdrive_client_secret", ""))
-                if self.previous_paths.get("gdrive_token"):
-                    cid  = self.previous_paths.get("gdrive_client_id", "")
-                    csec = self.previous_paths.get("gdrive_client_secret", "")
-                    if GDRIVE_AVAILABLE and cid and csec:
-                        self.gdrive_sync = GoogleDriveSync(cid, csec, self.previous_paths["gdrive_token"])
-                        if self.gdrive_sync.is_authenticated():
-                            self.gd_status_label.setText("✓ Connected")
-                            self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+                # Google Drive (via rclone)
+                if self.previous_paths.get("rclone_gdrive_token"):
+                    self.rclone_gdrive = RcloneSync("gdrive", self.previous_paths["rclone_gdrive_token"])
+                    self.gd_status_label.setText("✓ Authorized")
+                    self.gd_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
 
-                # Dropbox
-                self.db_app_key_input.setText(self.previous_paths.get("dropbox_app_key", ""))
-                self.db_app_secret_input.setText(self.previous_paths.get("dropbox_app_secret", ""))
-                if self.previous_paths.get("dropbox_access_token"):
-                    self.dropbox_sync = DropboxSync(
-                        self.previous_paths.get("dropbox_app_key", ""),
-                        self.previous_paths.get("dropbox_app_secret", ""),
-                        self.previous_paths.get("dropbox_access_token", ""),
-                        self.previous_paths.get("dropbox_refresh_token", ""),
-                    )
-                    if self.dropbox_sync.is_authenticated():
-                        self.db_status_label.setText("✓ Connected")
-                        self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+                # Dropbox (via rclone)
+                if self.previous_paths.get("rclone_dropbox_token"):
+                    self.rclone_dropbox = RcloneSync("dropbox", self.previous_paths["rclone_dropbox_token"])
+                    self.db_status_label.setText("✓ Authorized")
+                    self.db_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
 
                 # Local network machine
                 self.lm_username_input.setText(self.previous_paths.get("lm_username", ""))
@@ -2723,10 +2473,8 @@ class SyncApp(QMainWindow):
         settings["cloud_enabled"]      = self.cloud_enabled_checkbox.isChecked()
         settings["cloud_provider_idx"] = self.cloud_provider_group.checkedId()
         settings["cloud_folder"]       = self.cloud_folder_input.text()
-        settings["gdrive_client_id"]     = self.gd_client_id_input.text()
-        settings["gdrive_client_secret"] = self.gd_client_secret_input.text()
-        settings["dropbox_app_key"]      = self.db_app_key_input.text()
-        settings["dropbox_app_secret"]   = self.db_app_secret_input.text()
+        settings["rclone_gdrive_token"]  = self.previous_paths.get("rclone_gdrive_token", "")
+        settings["rclone_dropbox_token"] = self.previous_paths.get("rclone_dropbox_token", "")
         # Local machine
         settings["lm_ip"]          = self.previous_paths.get("lm_ip", "")
         settings["lm_username"]    = self.lm_username_input.text()
