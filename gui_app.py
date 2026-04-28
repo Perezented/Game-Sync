@@ -611,16 +611,36 @@ class LocalNetworkSync:
 
     # ── Direct machine-to-machine sync (absolute paths, rsync --update) ────────
 
+    def _expand_remote_path(self, client, path: str) -> str:
+        """Expand leading ~ in a remote path by querying $HOME via SSH."""
+        if not path.startswith("~"):
+            return path
+        _, stdout, _ = client.exec_command("echo $HOME")
+        home = stdout.read().decode().strip()
+        if not home:
+            raise RuntimeError("Could not determine remote home directory (echo $HOME returned empty).")
+        return home + path[1:]  # replace the leading ~ with actual home
+
     def push_path(self, local_path: str | Path, remote_path: str):
         """Push local_path to absolute remote_path on the remote machine."""
-        lp = Path(local_path)
+        lp = Path(local_path).expanduser()
+        print(f"[push_path] local={lp!r}  remote={remote_path!r}")
+        if not lp.exists():
+            raise FileNotFoundError(
+                f"Local source path does not exist: {lp}\n"
+                f"Check the Source Path field in the UI."
+            )
         has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        print(f"[push_path] has_rsync={has_rsync}  use_sftp={bool(self.ssh_password or not has_rsync)}")
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
             client, sftp = self._sftp_client()
             try:
+                remote_path = self._expand_remote_path(client, remote_path)
+                print(f"[push_path] SFTP mkdir_p {remote_path!r}")
                 self._sftp_mkdir_p(sftp, remote_path)
+                print(f"[push_path] SFTP put_recursive {lp!r} -> {remote_path!r}")
                 self._sftp_put_recursive(sftp, lp, remote_path)
             finally:
                 sftp.close()
@@ -630,19 +650,34 @@ class LocalNetworkSync:
         src_arg  = str(lp) + ("/" if lp.is_dir() else "")
         dest_arg = f"{self.username}@{self.ip}:{remote_path}"
         cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, dest_arg]
+        print(f"[push_path] rsync cmd: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        print(f"[push_path] rsync exit={result.returncode}  stderr={result.stderr.strip()!r}")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"rsync push failed (exit {result.returncode})")
 
     def pull_path(self, remote_path: str, local_path: str | Path):
         """Pull from absolute remote_path on the remote machine to local_path."""
-        lp = Path(local_path)
+        lp = Path(local_path).expanduser()
+        print(f"[pull_path] remote={remote_path!r}  local={lp!r}")
         has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        print(f"[pull_path] has_rsync={has_rsync}  use_sftp={bool(self.ssh_password or not has_rsync)}")
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
             client, sftp = self._sftp_client()
             try:
+                remote_path = self._expand_remote_path(client, remote_path)
+                print(f"[pull_path] expanded remote={remote_path!r}")
+                # Verify remote path exists before attempting download
+                try:
+                    sftp.stat(remote_path)
+                except FileNotFoundError:
+                    raise FileNotFoundError(
+                        f"Remote path does not exist: {remote_path}\n"
+                        f"Check the Destination Path field or ensure the remote directory exists."
+                    )
+                print(f"[pull_path] SFTP get_recursive {remote_path!r} -> {lp!r}")
                 self._sftp_get_recursive(sftp, remote_path, lp)
             finally:
                 sftp.close()
@@ -652,7 +687,9 @@ class LocalNetworkSync:
         ssh_cmd  = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
         src_arg  = f"{self.username}@{self.ip}:{remote_path}/"
         cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, str(lp)]
+        print(f"[pull_path] rsync cmd: {' '.join(cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        print(f"[pull_path] rsync exit={result.returncode}  stderr={result.stderr.strip()!r}")
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"rsync pull failed (exit {result.returncode})")
 
@@ -676,6 +713,7 @@ class DirectSyncWorkerThread(QThread):
         try:
             verb = "Pushing to" if self.operation == "push" else "Pulling from"
             self.progress.emit(f"{verb} remote machine…")
+            print(f"[DirectSyncWorkerThread] op={self.operation!r}  local={self.local_path!r}  remote={self.remote_path!r}")
             if self.operation == "push":
                 self.sync_obj.push_path(self.local_path, self.remote_path)
                 self.finished.emit(True, "Push complete.")
@@ -683,6 +721,9 @@ class DirectSyncWorkerThread(QThread):
                 self.sync_obj.pull_path(self.remote_path, self.local_path)
                 self.finished.emit(True, "Pull complete.")
         except Exception as exc:
+            import traceback
+            print(f"[DirectSyncWorkerThread] ERROR: {exc}")
+            traceback.print_exc()
             self.finished.emit(False, str(exc))
 
 
@@ -1296,6 +1337,9 @@ class SyncApp(QMainWindow):
         ])
         content_layout.addWidget(self.sync_direction_dropdown)
 
+        self.sync_direction_label.setVisible(False)
+        self.sync_direction_dropdown.setVisible(False)
+
         # ── Sync Button ───────────────────────────────────────────────────────
         self.sync_button = QPushButton("⬆  Push to Dest")
         self.sync_button.setStyleSheet("background-color: #3a5a8a; color: white;")
@@ -1331,8 +1375,8 @@ class SyncApp(QMainWindow):
         content_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         sync_btn_row = QHBoxLayout()
-        sync_btn_row.addWidget(self.sync_button)
         sync_btn_row.addWidget(self.pull_dest_btn)
+        sync_btn_row.addWidget(self.sync_button)
         sync_btn_row.addWidget(self.push_cloud_btn)
         sync_btn_row.addWidget(self.pull_cloud_btn)
         content_layout.addLayout(sync_btn_row)
@@ -1375,13 +1419,13 @@ class SyncApp(QMainWindow):
         self.pull_cloud_btn.setVisible(cloud_on)
         self.cloud_op_status_label.setVisible(cloud_on)
         self.direct_sync_status_label.setVisible(not cloud_on)
-        # Hide sync direction and destination path when cloud storage is enabled.
-        self.sync_direction_label.setVisible(not cloud_on)
-        self.sync_direction_dropdown.setVisible(not cloud_on)
+        self.sync_direction_label.setVisible(False)
+        self.sync_direction_dropdown.setVisible(False)
         self.dest_machine_widget.setVisible(not cloud_on)
         self.dest_ssh_section.setVisible(not cloud_on and dest_selected)
         self.dest_label.setVisible(not cloud_on)
         self.dest_path.setVisible(not cloud_on)
+        self.dest_default_btn.setVisible(not cloud_on)
         if cloud_on:
             self._refresh_cloud_folder_default()
         self.save_settings()
