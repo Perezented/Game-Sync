@@ -381,15 +381,58 @@ class CloudWorkerThread(QThread):
         self.local_path   = local_path
         self.cloud_folder = cloud_folder
         self._cancelled   = False
+        self._proc        = None  # subprocess.Popen reference for LocalNetworkSync rsync
 
     def cancel(self):
         self._cancelled = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _store_proc(self, proc):
+        self._proc = proc
 
     def run(self):
         if self._cancelled:
             self.finished.emit(False, "Cancelled.")
             return
         try:
+            # ── LocalNetworkSync: use push_path / pull_path for streaming output,
+            #    cancel support and rsync --update semantics (same as Direct Sync).
+            if hasattr(self.sync_obj, 'push_path'):
+                lns = self.sync_obj
+                # Remote path = remote_base / cloud_folder  (mirrors upload() logic)
+                remote_path = f"{lns.remote_base.rstrip('/')}/{self.cloud_folder.lstrip('/')}"
+                if self.operation == "upload":
+                    self.progress.emit(f"── Pushing to {lns.ip}:{remote_path} ──")
+                    lns.push_path(
+                        self.local_path, remote_path,
+                        on_line=self.progress.emit,
+                        on_proc=self._store_proc,
+                        cancelled=lambda: self._cancelled,
+                    )
+                    if self._cancelled:
+                        self.finished.emit(False, "Cancelled.")
+                    else:
+                        self.finished.emit(True, "Upload complete.")
+                else:
+                    self.progress.emit(f"── Pulling from {lns.ip}:{remote_path} ──")
+                    lns.pull_path(
+                        remote_path, self.local_path,
+                        on_line=self.progress.emit,
+                        on_proc=self._store_proc,
+                        cancelled=lambda: self._cancelled,
+                    )
+                    if self._cancelled:
+                        self.finished.emit(False, "Cancelled.")
+                    else:
+                        self.finished.emit(True, "Download complete.")
+                return
+
+            # ── Google Drive / Dropbox: standard upload / download ──────────
             self.progress.emit(f"{self.operation.title()}ing to/from cloud…")
             if self.operation == "upload":
                 self.sync_obj.upload(self.local_path, self.cloud_folder)
@@ -398,6 +441,8 @@ class CloudWorkerThread(QThread):
                 self.sync_obj.download(self.cloud_folder, self.local_path)
                 self.finished.emit(True, "Download complete.")
         except Exception as exc:
+            import traceback
+            traceback.print_exc()
             self.finished.emit(False, "Cancelled." if self._cancelled else str(exc))
 
 
@@ -514,7 +559,7 @@ class LocalNetworkSync:
         return client, client.open_sftp()
 
     def _sftp_mkdir_p(self, sftp, remote_dir: str):
-        """Recursively create remote directories via SFTP."""
+        """Recursively create remote directories via SFTP (like mkdir -p)."""
         parts = remote_dir.replace("\\", "/").split("/")
         path  = ""
         for part in parts:
@@ -524,8 +569,14 @@ class LocalNetworkSync:
             path = f"{path}/{part}" if path and path != "/" else f"/{part}" if path == "/" else part
             try:
                 sftp.stat(path)
-            except FileNotFoundError:
-                sftp.mkdir(path)
+            except OSError:
+                # Directory doesn't exist (or stat failed) — try to create it.
+                # Ignore EEXIST in case of a race or if the server reports the
+                # parent-not-found as PermissionError instead of ENOENT.
+                try:
+                    sftp.mkdir(path)
+                except OSError:
+                    pass  # already exists or skip — stat on next iteration catches real failures
 
     def _sftp_put_recursive(self, sftp, local: Path, remote: str, on_line=None, cancelled=None):
         """Upload local file or directory tree to remote path via SFTP.
@@ -1277,6 +1328,10 @@ class SyncApp(QMainWindow):
         self.lm_port_input.setFixedWidth(50)
         lm_port_test_row.addWidget(self.lm_port_input)
         lm_port_test_row.addSpacing(10)
+        self.lm_pass_btn = QPushButton("Set Password")
+        self.lm_pass_btn.setFixedWidth(110)
+        self.lm_pass_btn.clicked.connect(self._set_lm_password)
+        lm_port_test_row.addWidget(self.lm_pass_btn)
         self.lm_test_btn = QPushButton("Test Connection")
         self.lm_test_btn.setFixedWidth(130)
         self.lm_test_btn.clicked.connect(self._test_local_machine_connection)
@@ -1487,8 +1542,8 @@ class SyncApp(QMainWindow):
         sync_btn_row = QHBoxLayout()
         sync_btn_row.addWidget(self.pull_dest_btn)
         sync_btn_row.addWidget(self.sync_button)
-        sync_btn_row.addWidget(self.push_cloud_btn)
         sync_btn_row.addWidget(self.pull_cloud_btn)
+        sync_btn_row.addWidget(self.push_cloud_btn)
         content_layout.addLayout(sync_btn_row)
         content_layout.addWidget(self.cloud_op_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
         content_layout.addWidget(self.direct_sync_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -1648,6 +1703,18 @@ class SyncApp(QMainWindow):
         )
         if path:
             self.dest_ssh_key_input.setText(path)
+
+    def _set_lm_password(self):
+        password, ok = QInputDialog.getText(
+            self,
+            "Local Machine SSH Password",
+            "Enter SSH password for the local network machine:",
+            QLineEdit.EchoMode.Password,
+        )
+        if ok and password:
+            self.lm_password = password
+            self.lm_pass_btn.setText("Password Set ✓")
+            self.lm_pass_btn.setStyleSheet("color: #7ed6a9;")
 
     def _set_dest_password(self):
         password, ok = QInputDialog.getText(
@@ -1952,12 +2019,14 @@ class SyncApp(QMainWindow):
         return objects
 
     def _cloud_folder_for_game(self) -> str:
-        folder = self.cloud_folder_input.text().strip()
         game   = self.game_dropdown.currentText() or "Game"
+        # Local Machine mode: cloud_folder_row is hidden, always use just the
+        # game name so it gets appended cleanly to remote_base (e.g.
+        # /home/user/GameSync + ProjectZomboid → /home/user/GameSync/ProjectZomboid).
+        if self.cloud_provider_group.checkedId() == 3:
+            return game
+        folder = self.cloud_folder_input.text().strip()
         if not folder:
-            # Local machine mode: just the game name as a sub-folder under remote_base
-            if self.cloud_provider_group.checkedId() == 3:
-                return game
             folder = f"/GameSync/{game}/"
         return folder
 
@@ -2396,10 +2465,11 @@ class SyncApp(QMainWindow):
         self._current_dest_mac = dest_mac
         self._current_dest_ip  = dest_ip
 
-        # Show destination SSH credentials section
-        self.dest_ssh_section.setVisible(True)
-        self.pull_dest_btn.setVisible(True)
-        self.direct_sync_status_label.setVisible(True)
+        # Show destination SSH credentials section (only when cloud is not active)
+        cloud_on = self.cloud_enabled_checkbox.isChecked()
+        self.dest_ssh_section.setVisible(not cloud_on)
+        self.pull_dest_btn.setVisible(not cloud_on)
+        self.direct_sync_status_label.setVisible(not cloud_on)
 
         # Load saved credentials for this destination machine
         saved_creds = self.previous_paths.get("dest_machine_creds", {}).get(dest_mac, {})
