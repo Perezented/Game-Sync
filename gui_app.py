@@ -1303,7 +1303,7 @@ class SyncApp(QMainWindow):
         lm_path_label.setFixedWidth(80)
         lm_path_row.addWidget(lm_path_label)
         self.lm_remote_path_input = QLineEdit()
-        self.lm_remote_path_input.setPlaceholderText("e.g.  /home/pi/GameSync")
+        self.lm_remote_path_input.setPlaceholderText("e.g.  `/home/pi/` or  `C:\\Users\\User\\`")
         lm_path_row.addWidget(self.lm_remote_path_input)
         lm_layout.addLayout(lm_path_row)
 
@@ -1661,7 +1661,11 @@ class SyncApp(QMainWindow):
     def _refresh_local_machine_scan_state(self):
         has_hosts = self.lm_host_dropdown.count() > 1
         self.lm_host_dropdown.setEnabled(has_hosts)
-        self.lm_scan_progress.setVisible(self.scan_active and self.local_machine_section.isVisible())
+        lm_active = (
+            self.cloud_enabled_checkbox.isChecked()
+            and self.cloud_provider_group.checkedId() == 3
+        )
+        self.lm_scan_progress.setVisible(self.scan_active and lm_active)
 
     def _remote_os_from_direction(self, direction: str) -> str:
         if "↔" not in direction:
