@@ -29,7 +29,6 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QPlainTextEdit,
     QTabWidget,
-    QSpinBox,
     QMessageBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
@@ -984,12 +983,10 @@ class SyncApp(QMainWindow):
         self.scan_performed = False
         self._loading = False
         self.scan_timer = QTimer(self)
-        # Apply the saved interval (loaded before scan_timer was created)
-        saved_interval_s = self.settings_scan_interval.value()
-        self.scan_timer.setInterval(max(15, saved_interval_s) * 1000)
+        self.scan_timer.setInterval(60_000)
         self.scan_timer.timeout.connect(self.on_scan_timer_timeout)
         self.scan_timer.start()
-        if self._should_auto_scan_network():  # respects saved autoscan checkbox
+        if self._should_auto_scan_network():
             self.start_network_scan()
 
         self._last_game_selected = self.game_dropdown.currentText()
@@ -1708,59 +1705,99 @@ class SyncApp(QMainWindow):
         # ── Tab 2: Settings ───────────────────────────────────────────────────
         settings_tab = QWidget()
         settings_tab.setStyleSheet("background-color: #2a2a2a;")
-        settings_vbox = QVBoxLayout(settings_tab)
-        settings_vbox.setContentsMargins(12, 8, 12, 8)
-        settings_vbox.setSpacing(8)
+        settings_outer = QVBoxLayout(settings_tab)
+        settings_outer.setContentsMargins(0, 0, 0, 0)
+        settings_outer.setSpacing(0)
 
-        st_header = QLabel("Application Settings")
-        st_header.setStyleSheet("font-size: 13px; font-weight: bold; color: #9fd3ff;")
-        settings_vbox.addWidget(st_header)
-
-        # Auto-scan on startup
-        self.settings_autoscan_cb = QCheckBox("Auto-scan network on startup")
-        self.settings_autoscan_cb.setChecked(True)
-        self.settings_autoscan_cb.setToolTip(
-            "Automatically scan the local network for machines when the app launches."
+        # Inner scrollable widget so the panel never clips on small windows
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setStyleSheet(
+            "QScrollArea { background: #2a2a2a; border: none; }"
+            "QWidget { background: transparent; }"
         )
-        self.settings_autoscan_cb.toggled.connect(self.save_settings)
-        settings_vbox.addWidget(self.settings_autoscan_cb)
+        settings_inner = QWidget()
+        settings_inner.setStyleSheet("background-color: #2a2a2a;")
+        settings_vbox = QVBoxLayout(settings_inner)
+        settings_vbox.setContentsMargins(12, 10, 12, 10)
+        settings_vbox.setSpacing(4)
 
-        # Scan interval
-        scan_interval_row = QHBoxLayout()
-        scan_interval_lbl = QLabel("Background scan interval (seconds):")
-        scan_interval_lbl.setFixedWidth(240)
-        scan_interval_row.addWidget(scan_interval_lbl)
-        self.settings_scan_interval = QSpinBox()
-        self.settings_scan_interval.setRange(15, 3600)
-        self.settings_scan_interval.setValue(60)
-        self.settings_scan_interval.setFixedWidth(70)
-        self.settings_scan_interval.setToolTip(
-            "How often (in seconds) the background network re-scan fires."
+        def _section_header(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(
+                "font-size: 12px; font-weight: bold; color: #9fd3ff;"
+                " padding-top: 6px; padding-bottom: 2px;"
+            )
+            return lbl
+
+        def _hint(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet("font-size: 10px; color: #888;")
+            lbl.setWordWrap(True)
+            return lbl
+
+        def _sep() -> QFrame:
+            f = QFrame()
+            f.setFrameShape(QFrame.Shape.HLine)
+            f.setStyleSheet("color: #3d3d3d; margin: 4px 0;")
+            return f
+
+        # ── Section: Sync Behaviour ───────────────────────────────────────────
+        settings_vbox.addWidget(_section_header("🔄  Sync Behaviour"))
+
+        self.settings_confirm_sync_cb = QCheckBox(
+            "Ask me to confirm before every push or pull"
         )
-        self.settings_scan_interval.valueChanged.connect(self._on_scan_interval_changed)
-        scan_interval_row.addWidget(self.settings_scan_interval)
-        scan_interval_row.addStretch()
-        settings_vbox.addLayout(scan_interval_row)
-
-        # Confirm before sync
-        self.settings_confirm_sync_cb = QCheckBox("Ask for confirmation before syncing")
         self.settings_confirm_sync_cb.setChecked(False)
         self.settings_confirm_sync_cb.setToolTip(
-            "Show a confirmation dialog before each push or pull operation."
+            "Shows a Yes/No dialog so you don't accidentally overwrite saves."
         )
         self.settings_confirm_sync_cb.toggled.connect(self.save_settings)
         settings_vbox.addWidget(self.settings_confirm_sync_cb)
 
-        # Show sync log automatically
-        self.settings_autoscroll_cb = QCheckBox("Auto-scroll sync log to latest entry")
-        self.settings_autoscroll_cb.setChecked(True)
-        self.settings_autoscroll_cb.setToolTip(
-            "Keep the sync log scrolled to the most recent line."
+        settings_vbox.addWidget(_sep())
+
+        # ── Section: Raw JSON editor ──────────────────────────────────────────
+        settings_vbox.addWidget(_section_header("🛠  Advanced: Raw Settings File"))
+        settings_vbox.addWidget(_hint(
+            "Power users: edit the raw JSON that is saved to disk.  "
+            "Be careful — invalid JSON will be rejected.  "
+            "Use 'Reload from disk' to discard any unsaved edits."
+        ))
+
+        self.settings_json_editor = QPlainTextEdit()
+        self.settings_json_editor.setStyleSheet(
+            "QPlainTextEdit { background: #1a1a1a; color: #d4d4d4;"
+            " font-family: monospace; font-size: 11px; border: 1px solid #555; }"
         )
-        self.settings_autoscroll_cb.toggled.connect(self.save_settings)
-        settings_vbox.addWidget(self.settings_autoscroll_cb)
+        self.settings_json_editor.setMinimumHeight(160)
+        settings_vbox.addWidget(self.settings_json_editor)
+
+        json_btn_row = QHBoxLayout()
+        st_reload_btn = QPushButton("↺  Reload from disk")
+        st_reload_btn.setToolTip("Discard edits and reload the file from disk.")
+        st_reload_btn.clicked.connect(self._st_reload_json)
+        json_btn_row.addWidget(st_reload_btn)
+
+        st_save_json_btn = QPushButton("💾  Save JSON to disk")
+        st_save_json_btn.setToolTip("Validate and save the JSON shown above to disk.")
+        st_save_json_btn.setStyleSheet(
+            "QPushButton { background: #2a4a2a; color: #aaffaa; border: 1px solid #3a6a3a; }"
+            "QPushButton:hover { background: #3a6a3a; }"
+        )
+        st_save_json_btn.clicked.connect(self._st_save_json)
+        json_btn_row.addWidget(st_save_json_btn)
+
+        self.st_json_status = QLabel("")
+        self.st_json_status.setStyleSheet("font-size: 10px; color: gray;")
+        json_btn_row.addWidget(self.st_json_status)
+        json_btn_row.addStretch()
+        settings_vbox.addLayout(json_btn_row)
 
         settings_vbox.addStretch()
+        settings_scroll.setWidget(settings_inner)
+        settings_outer.addWidget(settings_scroll)
         footer_tabs.addTab(settings_tab, "⚙  Settings")
         
         # ── Tab 3: About ──────────────────────────────────────────────────────
@@ -2139,10 +2176,8 @@ class SyncApp(QMainWindow):
     def _log_append(self, msg: str):
         """Append a line to the sync log panel."""
         self.sync_log.appendPlainText(msg)
-        # auto-scroll to bottom (if setting enabled)
-        if not getattr(self, "settings_autoscroll_cb", None) or self.settings_autoscroll_cb.isChecked():
-            sb = self.sync_log.verticalScrollBar()
-            sb.setValue(sb.maximum())
+        sb = self.sync_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
     def _on_direct_sync_progress(self, msg: str):
         self.direct_sync_status_label.setText(msg[:120])
@@ -2591,6 +2626,86 @@ class SyncApp(QMainWindow):
         if path:
             self.lm_ssh_key_input.setText(path)
 
+    # ── Settings-tab helpers ──────────────────────────────────────────────────
+
+    def _st_browse_ssh_key(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select SSH Private Key", str(Path.home() / ".ssh"), "All files (*)"
+        )
+        if path:
+            self.st_lm_ssh_key_input.setText(path)
+            self._st_sync_to_main()
+
+    def _st_sync_to_main(self):
+        """Copy settings-tab mirror fields → main cloud section fields, then save."""
+        self.lm_username_input.setText(self.st_lm_username_input.text())
+        self.lm_remote_path_input.setText(self.st_lm_remote_path_input.text())
+        self.lm_port_input.setText(self.st_lm_port_input.text() or "22")
+        self.lm_ssh_key_input.setText(self.st_lm_ssh_key_input.text())
+        self.save_settings()
+
+    def _st_clear_saved_paths(self):
+        reply = QMessageBox.question(
+            self,
+            "Clear saved paths?",
+            "This will erase all remembered source/destination paths for every "
+            "game+machine combination.\n\n"
+            "Your credentials, cloud tokens and other settings are NOT affected.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.previous_paths.pop("game_machine_paths", None)
+        self.save_settings()
+        self._st_reload_json()
+        self.st_json_status.setText("✓ Saved paths cleared.")
+        self.st_json_status.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+
+    def _st_reload_json(self):
+        """Load the settings file from disk and display it in the JSON editor."""
+        try:
+            if self.settings_file.exists():
+                raw = self.settings_file.read_text(encoding="utf-8")
+                # Pretty-print for readability
+                parsed = json.loads(raw)
+                pretty = json.dumps(parsed, indent=2, ensure_ascii=False)
+                self.settings_json_editor.setPlainText(pretty)
+                self.st_json_status.setText("Loaded from disk.")
+                self.st_json_status.setStyleSheet("font-size: 10px; color: gray;")
+            else:
+                self.settings_json_editor.setPlainText("{}")
+                self.st_json_status.setText("No settings file found yet.")
+                self.st_json_status.setStyleSheet("font-size: 10px; color: gray;")
+        except Exception as exc:
+            self.st_json_status.setText(f"Error: {exc}")
+            self.st_json_status.setStyleSheet("font-size: 10px; color: red;")
+
+    def _st_save_json(self):
+        """Validate and write the JSON editor contents to disk, then reload UI."""
+        raw = self.settings_json_editor.toPlainText().strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.st_json_status.setText(f"❌ Invalid JSON – {exc}")
+            self.st_json_status.setStyleSheet("font-size: 10px; color: red;")
+            return
+        try:
+            self.settings_file.write_text(
+                json.dumps(parsed, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            self.previous_paths = parsed
+            self.st_json_status.setText("✓ Saved successfully.")
+            self.st_json_status.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+            # Refresh the pretty-printed view with the canonical format
+            self.settings_json_editor.setPlainText(
+                json.dumps(parsed, indent=2, ensure_ascii=False)
+            )
+        except Exception as exc:
+            self.st_json_status.setText(f"Write error: {exc}")
+            self.st_json_status.setStyleSheet("font-size: 10px; color: red;")
+
     def _request_local_machine_password(self) -> str | None:
         password, ok = QInputDialog.getText(
             self,
@@ -2689,18 +2804,11 @@ class SyncApp(QMainWindow):
         self.start_network_scan()
 
     def _should_auto_scan_network(self) -> bool:
-        if not getattr(self, "settings_autoscan_cb", None) or not self.settings_autoscan_cb.isChecked():
-            return False
         if self._current_dest_mac:
             return False
         if self.scan_dropdown.count() <= 1 and not self.scan_performed:
             return True
         return False
-
-    def _on_scan_interval_changed(self, value: int):
-        if hasattr(self, "scan_timer"):
-            self.scan_timer.setInterval(value * 1000)
-        self.save_settings()
 
     def _update_scan_button_label(self):
         if self.scan_dropdown.currentIndex() > 0:
@@ -3034,17 +3142,8 @@ class SyncApp(QMainWindow):
                     self.db_connect_btn.setText("Re-authorize")
 
                 # ── Application settings tab ────────────────────────────────────
-                self.settings_autoscan_cb.setChecked(
-                    self.previous_paths.get("settings_autoscan", True)
-                )
-                self.settings_scan_interval.setValue(
-                    int(self.previous_paths.get("settings_scan_interval", 60))
-                )
                 self.settings_confirm_sync_cb.setChecked(
                     self.previous_paths.get("settings_confirm_sync", False)
-                )
-                self.settings_autoscroll_cb.setChecked(
-                    self.previous_paths.get("settings_autoscroll", True)
                 )
 
                 # Local network machine
@@ -3056,6 +3155,19 @@ class SyncApp(QMainWindow):
                 )
                 self.lm_port_input.setText(self.previous_paths.get("lm_port", "22"))
                 self.lm_ssh_key_input.setText(self.previous_paths.get("lm_ssh_key", ""))
+                # ── Settings-tab mirror fields ──────────────────────────────────
+                self.st_lm_username_input.setText(
+                    self.previous_paths.get("lm_username", "")
+                )
+                self.st_lm_remote_path_input.setText(
+                    self.previous_paths.get("lm_remote_path", "")
+                )
+                self.st_lm_port_input.setText(
+                    self.previous_paths.get("lm_port", "22")
+                )
+                self.st_lm_ssh_key_input.setText(
+                    self.previous_paths.get("lm_ssh_key", "")
+                )
                 if self.previous_paths.get("lm_ip") and self.previous_paths.get(
                     "lm_username"
                 ):
@@ -3077,6 +3189,10 @@ class SyncApp(QMainWindow):
         # or when no path has been saved yet for the current game.
         if not self.dest_path.text():
             self.update_paths()
+
+        # Populate the raw JSON editor in the Settings tab
+        if hasattr(self, "settings_json_editor"):
+            self._st_reload_json()
 
     def _game_machine_key(self) -> str:
         """Unique key for the current (game, destination-MAC) combination."""
@@ -3171,10 +3287,7 @@ class SyncApp(QMainWindow):
             settings["last_dest_ip"] = self._current_dest_ip
 
         # ── Application settings tab ──────────────────────────────────────────
-        settings["settings_autoscan"] = self.settings_autoscan_cb.isChecked()
-        settings["settings_scan_interval"] = self.settings_scan_interval.value()
         settings["settings_confirm_sync"] = self.settings_confirm_sync_cb.isChecked()
-        settings["settings_autoscroll"] = self.settings_autoscroll_cb.isChecked()
 
         # ── Cloud UI state ────────────────────────────────────────────────────
         settings["cloud_enabled"] = self.cloud_enabled_checkbox.isChecked()
@@ -3197,6 +3310,11 @@ class SyncApp(QMainWindow):
             with open(self.settings_file, "w") as f:
                 json.dump(settings, f, indent=2)
             self.previous_paths = settings
+            # Keep the raw JSON editor in the settings tab up to date
+            if hasattr(self, "settings_json_editor"):
+                self.settings_json_editor.setPlainText(
+                    json.dumps(settings, indent=2, ensure_ascii=False)
+                )
         except Exception as err:
             print(f"Could not save settings: {err}")
 
