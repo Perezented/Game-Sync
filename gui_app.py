@@ -452,6 +452,7 @@ class LocalNetworkSync:
                     "port": self.ssh_port,
                     "username": self.username,
                     "timeout": 8,
+                    "auth_timeout": 8,
                     "look_for_keys": False,
                     "allow_agent": False,
                 }
@@ -496,10 +497,12 @@ class LocalNetworkSync:
             hostname=self.ip,
             port=self.ssh_port,
             username=self.username,
-            password=self.ssh_password,
+            password=self.ssh_password or None,
+            key_filename=self.ssh_key if self.ssh_key else None,
             look_for_keys=False,
             allow_agent=False,
             timeout=10,
+            auth_timeout=10,
         )
         return client, client.open_sftp()
 
@@ -605,6 +608,82 @@ class LocalNetworkSync:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
+
+    # ── Direct machine-to-machine sync (absolute paths, rsync --update) ────────
+
+    def push_path(self, local_path: str | Path, remote_path: str):
+        """Push local_path to absolute remote_path on the remote machine."""
+        lp = Path(local_path)
+        has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        if self.ssh_password or not has_rsync:
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError("paramiko is required. Run: pip install paramiko")
+            client, sftp = self._sftp_client()
+            try:
+                self._sftp_mkdir_p(sftp, remote_path)
+                self._sftp_put_recursive(sftp, lp, remote_path)
+            finally:
+                sftp.close()
+                client.close()
+            return
+        ssh_cmd = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
+        src_arg  = str(lp) + ("/" if lp.is_dir() else "")
+        dest_arg = f"{self.username}@{self.ip}:{remote_path}"
+        cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, dest_arg]
+        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"rsync push failed (exit {result.returncode})")
+
+    def pull_path(self, remote_path: str, local_path: str | Path):
+        """Pull from absolute remote_path on the remote machine to local_path."""
+        lp = Path(local_path)
+        has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        if self.ssh_password or not has_rsync:
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError("paramiko is required. Run: pip install paramiko")
+            client, sftp = self._sftp_client()
+            try:
+                self._sftp_get_recursive(sftp, remote_path, lp)
+            finally:
+                sftp.close()
+                client.close()
+            return
+        lp.mkdir(parents=True, exist_ok=True)
+        ssh_cmd  = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
+        src_arg  = f"{self.username}@{self.ip}:{remote_path}/"
+        cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, str(lp)]
+        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"rsync pull failed (exit {result.returncode})")
+
+
+# ── Background thread for direct machine-to-machine sync ─────────────────────
+
+class DirectSyncWorkerThread(QThread):
+    """Runs a push_path / pull_path operation in a background thread."""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, sync_obj: LocalNetworkSync, operation: str,
+                 local_path: str, remote_path: str):
+        super().__init__()
+        self.sync_obj    = sync_obj
+        self.operation   = operation   # "push" or "pull"
+        self.local_path  = local_path
+        self.remote_path = remote_path
+
+    def run(self):
+        try:
+            verb = "Pushing to" if self.operation == "push" else "Pulling from"
+            self.progress.emit(f"{verb} remote machine…")
+            if self.operation == "push":
+                self.sync_obj.push_path(self.local_path, self.remote_path)
+                self.finished.emit(True, "Push complete.")
+            else:
+                self.sync_obj.pull_path(self.remote_path, self.local_path)
+                self.finished.emit(True, "Pull complete.")
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1098,6 +1177,70 @@ class SyncApp(QMainWindow):
 
         content_layout.addWidget(self.dest_machine_widget)
 
+        # ── Destination Machine SSH Credentials ───────────────────────────────
+        self.dest_ssh_section = QWidget()
+        self.dest_ssh_section.setVisible(False)
+        dest_ssh_layout = QVBoxLayout(self.dest_ssh_section)
+        dest_ssh_layout.setContentsMargins(0, 4, 0, 0)
+        dest_ssh_layout.setSpacing(4)
+
+        dest_ssh_header = QLabel("— Destination Machine SSH Credentials —")
+        dest_ssh_header.setStyleSheet("font-size: 11px; color: #7ed6a9;")
+        dest_ssh_layout.addWidget(dest_ssh_header)
+
+        dest_ssh_user_row = QHBoxLayout()
+        dest_ssh_user_label = QLabel("Username:")
+        dest_ssh_user_label.setFixedWidth(80)
+        dest_ssh_user_row.addWidget(dest_ssh_user_label)
+        self.dest_ssh_user_input = QLineEdit()
+        self.dest_ssh_user_input.setPlaceholderText("e.g. user or Administrator")
+        dest_ssh_user_row.addWidget(self.dest_ssh_user_input)
+        dest_ssh_layout.addLayout(dest_ssh_user_row)
+
+        dest_ssh_key_row = QHBoxLayout()
+        dest_ssh_key_label = QLabel("SSH Key:")
+        dest_ssh_key_label.setFixedWidth(80)
+        dest_ssh_key_row.addWidget(dest_ssh_key_label)
+        self.dest_ssh_key_input = QLineEdit()
+        self.dest_ssh_key_input.setPlaceholderText("(optional) path to private key")
+        dest_ssh_key_row.addWidget(self.dest_ssh_key_input)
+        dest_ssh_browse_btn = QPushButton("Browse")
+        dest_ssh_browse_btn.setFixedWidth(60)
+        dest_ssh_browse_btn.clicked.connect(self._browse_dest_ssh_key)
+        dest_ssh_key_row.addWidget(dest_ssh_browse_btn)
+        dest_ssh_layout.addLayout(dest_ssh_key_row)
+
+        dest_ssh_port_row = QHBoxLayout()
+        dest_ssh_port_label = QLabel("SSH Port:")
+        dest_ssh_port_label.setFixedWidth(80)
+        dest_ssh_port_row.addWidget(dest_ssh_port_label)
+        self.dest_ssh_port_input = QLineEdit("22")
+        self.dest_ssh_port_input.setFixedWidth(50)
+        dest_ssh_port_row.addWidget(self.dest_ssh_port_input)
+        dest_ssh_port_row.addSpacing(10)
+        self.dest_ssh_pass_btn = QPushButton("Set Password")
+        self.dest_ssh_pass_btn.setFixedWidth(110)
+        self.dest_ssh_pass_btn.clicked.connect(self._set_dest_password)
+        dest_ssh_port_row.addWidget(self.dest_ssh_pass_btn)
+        self.dest_ssh_test_btn = QPushButton("Test Connection")
+        self.dest_ssh_test_btn.setFixedWidth(130)
+        self.dest_ssh_test_btn.clicked.connect(self._test_dest_connection)
+        dest_ssh_port_row.addWidget(self.dest_ssh_test_btn)
+        self.dest_ssh_status_label = QLabel("Not tested")
+        self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: gray;")
+        dest_ssh_port_row.addWidget(self.dest_ssh_status_label)
+        dest_ssh_port_row.addStretch()
+        dest_ssh_layout.addLayout(dest_ssh_port_row)
+
+        self.dest_ssh_progress = QProgressBar()
+        self.dest_ssh_progress.setRange(0, 0)
+        self.dest_ssh_progress.setVisible(False)
+        self.dest_ssh_progress.setFixedHeight(12)
+        self.dest_ssh_progress.setTextVisible(False)
+        dest_ssh_layout.addWidget(self.dest_ssh_progress)
+
+        content_layout.addWidget(self.dest_ssh_section)
+
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
@@ -1138,8 +1281,18 @@ class SyncApp(QMainWindow):
         content_layout.addWidget(self.sync_direction_dropdown)
 
         # ── Sync Button ───────────────────────────────────────────────────────
-        self.sync_button = QPushButton("Start Sync")
+        self.sync_button = QPushButton("⬆  Push to Dest")
+        self.sync_button.setStyleSheet("background-color: #3a5a8a; color: white;")
         self.sync_button.clicked.connect(self.start_sync)
+
+        self.pull_dest_btn = QPushButton("⬇  Pull from Dest")
+        self.pull_dest_btn.setStyleSheet("background-color: #3a6a4a; color: white;")
+        self.pull_dest_btn.setVisible(False)
+        self.pull_dest_btn.clicked.connect(self.pull_from_dest)
+
+        self.direct_sync_status_label = QLabel("")
+        self.direct_sync_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        self.direct_sync_status_label.setVisible(False)
 
         self.push_cloud_btn = QPushButton("⬆  Push to Cloud")
         self.push_cloud_btn.setStyleSheet("background-color: #2a5f8a; color: white;")
@@ -1163,10 +1316,12 @@ class SyncApp(QMainWindow):
 
         sync_btn_row = QHBoxLayout()
         sync_btn_row.addWidget(self.sync_button)
+        sync_btn_row.addWidget(self.pull_dest_btn)
         sync_btn_row.addWidget(self.push_cloud_btn)
         sync_btn_row.addWidget(self.pull_cloud_btn)
         content_layout.addLayout(sync_btn_row)
         content_layout.addWidget(self.cloud_op_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        content_layout.addWidget(self.direct_sync_status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
@@ -1195,20 +1350,24 @@ class SyncApp(QMainWindow):
 
     def toggle_cloud_section(self, enabled: bool):
         self.cloud_section.setVisible(enabled)
-        # Show/hide sync buttons
-        self.sync_button.setVisible(not enabled)
-        self.push_cloud_btn.setVisible(enabled)
-        self.pull_cloud_btn.setVisible(enabled)
-        self.cloud_op_status_label.setVisible(enabled)
+        # When cloud is active, hide direct-machine buttons; when not, hide cloud buttons
+        cloud_on = enabled
+        dest_selected = bool(self._current_dest_mac or self._current_dest_ip)
+        self.sync_button.setVisible(not cloud_on)
+        self.pull_dest_btn.setVisible(not cloud_on and dest_selected)
+        self.push_cloud_btn.setVisible(cloud_on)
+        self.pull_cloud_btn.setVisible(cloud_on)
+        self.cloud_op_status_label.setVisible(cloud_on)
+        self.direct_sync_status_label.setVisible(not cloud_on)
         # Hide sync direction and destination path when cloud storage is enabled.
-        self.sync_direction_label.setVisible(not enabled)
-        self.sync_direction_dropdown.setVisible(not enabled)
-        self.dest_machine_widget.setVisible(not enabled)
-        self.dest_label.setVisible(not enabled)
-        self.dest_path.setVisible(not enabled)
-        if enabled:
+        self.sync_direction_label.setVisible(not cloud_on)
+        self.sync_direction_dropdown.setVisible(not cloud_on)
+        self.dest_machine_widget.setVisible(not cloud_on)
+        self.dest_ssh_section.setVisible(not cloud_on and dest_selected)
+        self.dest_label.setVisible(not cloud_on)
+        self.dest_path.setVisible(not cloud_on)
+        if cloud_on:
             self._refresh_cloud_folder_default()
-        self.save_settings()
         self.save_settings()
 
     def on_cloud_provider_changed(self, btn_id: int, checked: bool):
@@ -1279,6 +1438,143 @@ class SyncApp(QMainWindow):
         if default_path:
             self.dest_path.setText(default_path)
             self.save_settings()
+
+    # ── Destination machine SSH helpers ───────────────────────────────────────
+
+    def _browse_dest_ssh_key(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select SSH Private Key",
+            str(Path.home() / ".ssh"),
+            "All files (*)"
+        )
+        if path:
+            self.dest_ssh_key_input.setText(path)
+
+    def _set_dest_password(self):
+        password, ok = QInputDialog.getText(
+            self,
+            "Destination SSH Password",
+            "Enter SSH password for the destination machine:",
+            QLineEdit.EchoMode.Password,
+        )
+        if ok and password:
+            self.dest_password = password
+            self.dest_ssh_pass_btn.setText("Password Set ✓")
+            self.dest_ssh_pass_btn.setStyleSheet("color: #7ed6a9;")
+
+    def _build_dest_sync(self) -> "LocalNetworkSync | None":
+        """Build a LocalNetworkSync for the currently selected destination machine."""
+        ip  = self._current_dest_ip
+        usr = self.dest_ssh_user_input.text().strip()
+        if not ip or not usr:
+            return None
+        port_txt = self.dest_ssh_port_input.text().strip()
+        try:
+            port = int(port_txt) if port_txt else 22
+        except ValueError:
+            port = 22
+        key      = self.dest_ssh_key_input.text().strip()
+        password = getattr(self, "dest_password", "")
+        return LocalNetworkSync(ip, usr, "/", port, key, password)
+
+    def _test_dest_connection(self):
+        usr = self.dest_ssh_user_input.text().strip()
+        if not self._current_dest_ip or not usr:
+            self.dest_ssh_status_label.setText("Select a destination machine and enter username first.")
+            self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            return
+
+        sync_obj = self._build_dest_sync()
+        if sync_obj is None:
+            return
+
+        if not sync_obj.ssh_key and not sync_obj.ssh_password:
+            password = self._set_dest_password()  # type: ignore[func-returns-value]
+            # re-build with new password
+            sync_obj = self._build_dest_sync()
+            if sync_obj is None:
+                return
+
+        self.dest_ssh_test_btn.setEnabled(False)
+        self.dest_ssh_status_label.setText("Testing…")
+        self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
+        self.dest_ssh_progress.setVisible(True)
+
+        import threading  # noqa: PLC0415
+        def _run():
+            try:
+                ok, msg = sync_obj.test_connection()
+            except Exception as exc:
+                ok, msg = False, str(exc)
+            color = "#7ed6a9" if ok else "red"
+            QTimer.singleShot(0, lambda: self._on_dest_test_done(ok, msg, color))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_dest_test_done(self, ok: bool, msg: str, color: str):
+        self.dest_ssh_test_btn.setEnabled(True)
+        self.dest_ssh_progress.setVisible(False)
+        self.dest_ssh_status_label.setText(("✓ " if ok else "✗ ") + msg[:70])
+        self.dest_ssh_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
+        if ok:
+            self.save_settings()
+
+    # ── Direct machine-to-machine sync ────────────────────────────────────────
+
+    def _start_direct_sync(self, operation: str):
+        """Common launcher for push/pull between this machine and the destination."""
+        src  = self.source_path.text().strip()
+        dest = self.dest_path.text().strip()
+        if not src or not dest:
+            self.direct_sync_status_label.setText("Source Path and Destination Path must both be set.")
+            self.direct_sync_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            self.direct_sync_status_label.setVisible(True)
+            return
+
+        sync_obj = self._build_dest_sync()
+        if sync_obj is None:
+            self.direct_sync_status_label.setText(
+                "Fill in Destination SSH Username (and credentials) first."
+            )
+            self.direct_sync_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            self.direct_sync_status_label.setVisible(True)
+            return
+
+        if not sync_obj.ssh_key and not sync_obj.ssh_password:
+            self._set_dest_password()
+            sync_obj = self._build_dest_sync()
+            if not getattr(self, "dest_password", ""):
+                return   # user cancelled password entry
+
+        local_path  = src  if operation == "push" else dest
+        remote_path = dest if operation == "push" else src
+
+        self.sync_button.setEnabled(False)
+        self.pull_dest_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
+        self.direct_sync_status_label.setVisible(True)
+        self.save_settings()
+
+        self._direct_worker = DirectSyncWorkerThread(sync_obj, operation, local_path, remote_path)
+        self._direct_worker.progress.connect(self._on_direct_sync_progress)
+        self._direct_worker.finished.connect(self._on_direct_sync_finished)
+        self._direct_worker.start()
+
+    def _on_direct_sync_progress(self, msg: str):
+        self.direct_sync_status_label.setText(msg)
+
+    def _on_direct_sync_finished(self, ok: bool, msg: str):
+        self.sync_button.setEnabled(True)
+        self.pull_dest_btn.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if ok else 0)
+        QTimer.singleShot(2000, lambda: self.progress_bar.setVisible(False))
+        color = "#7ed6a9" if ok else "red"
+        self.direct_sync_status_label.setText(("✓ " if ok else "✗ ") + msg)
+        self.direct_sync_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
+
+    def pull_from_dest(self):
+        self._start_direct_sync("pull")
 
     # ── Google Drive auth ─────────────────────────────────────────────────────
 
@@ -1720,6 +2016,9 @@ class SyncApp(QMainWindow):
         if index <= 0 or index > len(self.scanned_hosts):
             self._current_dest_mac = ""
             self._current_dest_ip  = ""
+            self.dest_ssh_section.setVisible(False)
+            self.pull_dest_btn.setVisible(False)
+            self.direct_sync_status_label.setVisible(False)
             self._update_scan_button_label()
             return
 
@@ -1731,6 +2030,29 @@ class SyncApp(QMainWindow):
 
         self._current_dest_mac = dest_mac
         self._current_dest_ip  = dest_ip
+
+        # Show destination SSH credentials section
+        self.dest_ssh_section.setVisible(True)
+        self.pull_dest_btn.setVisible(True)
+        self.direct_sync_status_label.setVisible(True)
+
+        # Load saved credentials for this destination machine
+        saved_creds = self.previous_paths.get("dest_machine_creds", {}).get(dest_mac, {})
+        if saved_creds.get("username"):
+            self.dest_ssh_user_input.setText(saved_creds["username"])
+        elif not self.dest_ssh_user_input.text():
+            # Suggest username based on detected OS
+            self.dest_ssh_user_input.setPlaceholderText(
+                "pi / user" if remote_os == "Linux" else "Administrator"
+            )
+        if saved_creds.get("ssh_key"):
+            self.dest_ssh_key_input.setText(saved_creds["ssh_key"])
+        if saved_creds.get("port"):
+            self.dest_ssh_port_input.setText(str(saved_creds["port"]))
+        # Reset password button appearance (password is never persisted)
+        self.dest_password = ""
+        self.dest_ssh_pass_btn.setText("Set Password")
+        self.dest_ssh_pass_btn.setStyleSheet("")
 
         # Update in-memory record of last destination before setting direction
         # and paths so that _game_machine_key() returns the correct key when
@@ -1939,6 +2261,16 @@ class SyncApp(QMainWindow):
         game_cloud_folders[self.game_dropdown.currentText() or "__unknown__"] = self.cloud_folder_input.text()
         settings["game_cloud_folders"] = game_cloud_folders
 
+        # ── Destination machine SSH credentials (username + key, no password) ──
+        if self._current_dest_mac:
+            dest_machine_creds = settings.get("dest_machine_creds", {})
+            dest_machine_creds[self._current_dest_mac] = {
+                "username": self.dest_ssh_user_input.text(),
+                "ssh_key":  self.dest_ssh_key_input.text(),
+                "port":     self.dest_ssh_port_input.text(),
+            }
+            settings["dest_machine_creds"] = dest_machine_creds
+
         # ── Last destination machine ──────────────────────────────────────────
         if self._current_dest_mac:
             settings["last_dest_mac"] = self._current_dest_mac
@@ -1967,15 +2299,7 @@ class SyncApp(QMainWindow):
             print(f"Could not save settings: {err}")
 
     def start_sync(self):
-        source      = self.source_path.text()
-        destination = self.dest_path.text()
-        print(f"Syncing from {source} to {destination}")
-        self.sync_active = True
-        self.save_settings()
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(50)
-        self.progress_bar.setValue(100)
-        self.sync_active = False
+        self._start_direct_sync("push")
 
 
 if __name__ == "__main__":
