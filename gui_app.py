@@ -1110,15 +1110,27 @@ class SyncApp(QMainWindow):
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
 
+        source_row = QHBoxLayout()
         self.source_path = QLineEdit()
-        content_layout.addWidget(self.source_path)
+        source_row.addWidget(self.source_path)
+        self.source_default_btn = QPushButton("Default")
+        self.source_default_btn.setFixedWidth(90)
+        self.source_default_btn.clicked.connect(self._set_default_source_path)
+        source_row.addWidget(self.source_default_btn)
+        content_layout.addLayout(source_row)
 
         # ── Destination Path ──────────────────────────────────────────────────
         self.dest_label = QLabel("Destination Path (remote machine):")
         content_layout.addWidget(self.dest_label)
 
+        dest_row = QHBoxLayout()
         self.dest_path = QLineEdit()
-        content_layout.addWidget(self.dest_path)
+        dest_row.addWidget(self.dest_path)
+        self.dest_default_btn = QPushButton("Default")
+        self.dest_default_btn.setFixedWidth(90)
+        self.dest_default_btn.clicked.connect(self._set_default_dest_path)
+        dest_row.addWidget(self.dest_default_btn)
+        content_layout.addLayout(dest_row)
 
         # ── Sync Direction ────────────────────────────────────────────────────
         self.sync_direction_label = QLabel("Sync Direction:")
@@ -1245,6 +1257,36 @@ class SyncApp(QMainWindow):
         has_hosts = self.lm_host_dropdown.count() > 1
         self.lm_host_dropdown.setEnabled(has_hosts)
         self.lm_scan_progress.setVisible(self.scan_active and self.local_machine_section.isVisible())
+
+    def _remote_os_from_direction(self, direction: str) -> str:
+        if "↔" not in direction:
+            return "Linux"
+        left, right = [part.strip() for part in direction.split("↔")]
+        return right
+
+    def _default_game_path(self, field: str) -> str:
+        game = self.game_dropdown.currentText()
+        if not game:
+            return ""
+        defaults = self.game_defaults.get(game, {})
+        if field == "source":
+            key = "linux" if self.local_os == "Linux" else "windows"
+        else:
+            remote_os = self._remote_os_from_direction(self.sync_direction_dropdown.currentText())
+            key = "linux" if remote_os == "Linux" else "windows"
+        return defaults.get(key, "")
+
+    def _set_default_source_path(self):
+        default_path = self._default_game_path("source")
+        if default_path:
+            self.source_path.setText(default_path)
+            self.save_settings()
+
+    def _set_default_dest_path(self):
+        default_path = self._default_game_path("dest")
+        if default_path:
+            self.dest_path.setText(default_path)
+            self.save_settings()
 
     # ── Google Drive auth ─────────────────────────────────────────────────────
 
