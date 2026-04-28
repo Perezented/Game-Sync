@@ -376,12 +376,19 @@ class CloudWorkerThread(QThread):
 
     def __init__(self, operation: str, sync_obj, local_path: str, cloud_folder: str):
         super().__init__()
-        self.operation   = operation  # "upload" or "download"
-        self.sync_obj    = sync_obj
-        self.local_path  = local_path
+        self.operation    = operation  # "upload" or "download"
+        self.sync_obj     = sync_obj
+        self.local_path   = local_path
         self.cloud_folder = cloud_folder
+        self._cancelled   = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        if self._cancelled:
+            self.finished.emit(False, "Cancelled.")
+            return
         try:
             self.progress.emit(f"{self.operation.title()}ing to/from cloud…")
             if self.operation == "upload":
@@ -391,7 +398,7 @@ class CloudWorkerThread(QThread):
                 self.sync_obj.download(self.cloud_folder, self.local_path)
                 self.finished.emit(True, "Download complete.")
         except Exception as exc:
-            self.finished.emit(False, str(exc))
+            self.finished.emit(False, "Cancelled." if self._cancelled else str(exc))
 
 
 # ── Local network machine ("private cloud") helper ────────────────────────────
@@ -520,8 +527,10 @@ class LocalNetworkSync:
             except FileNotFoundError:
                 sftp.mkdir(path)
 
-    def _sftp_put_recursive(self, sftp, local: Path, remote: str, on_line=None):
+    def _sftp_put_recursive(self, sftp, local: Path, remote: str, on_line=None, cancelled=None):
         """Upload local file or directory tree to remote path via SFTP."""
+        if cancelled and cancelled():
+            raise RuntimeError("Cancelled.")
         self._sftp_mkdir_p(sftp, remote)
         if local.is_file():
             dest = f"{remote}/{local.name}"
@@ -530,27 +539,33 @@ class LocalNetworkSync:
             sftp.put(str(local), dest)
         else:
             for item in local.iterdir():
+                if cancelled and cancelled():
+                    raise RuntimeError("Cancelled.")
                 r_sub = f"{remote}/{item.name}"
                 if item.is_dir():
                     self._sftp_mkdir_p(sftp, r_sub)
-                    self._sftp_put_recursive(sftp, item, r_sub, on_line=on_line)
+                    self._sftp_put_recursive(sftp, item, r_sub, on_line=on_line, cancelled=cancelled)
                 else:
                     if on_line:
                         on_line(f"  sending {item.name}")
                     sftp.put(str(item), r_sub)
 
-    def _sftp_get_recursive(self, sftp, remote: str, local: Path, on_line=None):
+    def _sftp_get_recursive(self, sftp, remote: str, local: Path, on_line=None, cancelled=None):
         """Download remote directory tree to local path via SFTP."""
+        if cancelled and cancelled():
+            raise RuntimeError("Cancelled.")
         local.mkdir(parents=True, exist_ok=True)
         for entry in sftp.listdir_attr(remote):
+            if cancelled and cancelled():
+                raise RuntimeError("Cancelled.")
             r_path = f"{remote}/{entry.filename}"
             l_path = local / entry.filename
             import stat
             if stat.S_ISDIR(entry.st_mode):
-                self._sftp_get_recursive(sftp, r_path, l_path, on_line=on_line)
+                self._sftp_get_recursive(sftp, r_path, l_path, on_line=on_line, cancelled=cancelled)
             else:
                 if on_line:
-                    on_line(f"  receiving {entry.filename}")
+                    on_line(f"  receiving {r_path}")
                 sftp.get(r_path, str(l_path))
 
     # ── public transfer methods ────────────────────────────────────────────────
@@ -629,7 +644,7 @@ class LocalNetworkSync:
         return home + path[1:]  # replace the leading ~ with actual home
 
     def push_path(self, local_path: str | Path, remote_path: str,
-                  on_line=None):
+                  on_line=None, on_proc=None, cancelled=None):
         """Push local_path to absolute remote_path on the remote machine."""
         def _log(msg):
             print(msg)
@@ -652,7 +667,7 @@ class LocalNetworkSync:
                 remote_path = self._expand_remote_path(client, remote_path)
                 _log(f"[push] SFTP → {remote_path}")
                 self._sftp_mkdir_p(sftp, remote_path)
-                self._sftp_put_recursive(sftp, lp, remote_path, on_line=on_line)
+                self._sftp_put_recursive(sftp, lp, remote_path, on_line=on_line, cancelled=cancelled)
             finally:
                 sftp.close()
                 client.close()
@@ -664,16 +679,22 @@ class LocalNetworkSync:
         _log("[push] " + " ".join(cmd))
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, stdin=subprocess.DEVNULL)
+        if on_proc:
+            on_proc(proc)
         for line in proc.stdout:
+            if cancelled and cancelled():
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("Cancelled.")
             line = line.rstrip()
             if line:
                 _log(line)
         proc.wait()
-        if proc.returncode != 0:
+        if proc.returncode not in (0, -9):  # -9 = SIGKILL from cancel
             raise RuntimeError(f"rsync push failed (exit {proc.returncode})")
 
     def pull_path(self, remote_path: str, local_path: str | Path,
-                  on_line=None):
+                  on_line=None, on_proc=None, cancelled=None):
         """Pull from absolute remote_path on the remote machine to local_path."""
         def _log(msg):
             print(msg)
@@ -697,7 +718,7 @@ class LocalNetworkSync:
                         f"Remote path does not exist: {remote_path}\n"
                         f"Check the Destination Path field or ensure the remote directory exists."
                     )
-                self._sftp_get_recursive(sftp, remote_path, lp, on_line=on_line)
+                self._sftp_get_recursive(sftp, remote_path, lp, on_line=on_line, cancelled=cancelled)
             finally:
                 sftp.close()
                 client.close()
@@ -709,12 +730,18 @@ class LocalNetworkSync:
         _log("[pull] " + " ".join(cmd))
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, stdin=subprocess.DEVNULL)
+        if on_proc:
+            on_proc(proc)
         for line in proc.stdout:
+            if cancelled and cancelled():
+                proc.kill()
+                proc.wait()
+                raise RuntimeError("Cancelled.")
             line = line.rstrip()
             if line:
                 _log(line)
         proc.wait()
-        if proc.returncode != 0:
+        if proc.returncode not in (0, -9):  # -9 = SIGKILL from cancel
             raise RuntimeError(f"rsync pull failed (exit {proc.returncode})")
 
 
@@ -732,6 +759,20 @@ class DirectSyncWorkerThread(QThread):
         self.operation   = operation   # "push" or "pull"
         self.local_path  = local_path
         self.remote_path = remote_path
+        self._cancelled  = False
+        self._proc       = None
+
+    def cancel(self):
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _store_proc(self, proc):
+        self._proc = proc
 
     def run(self):
         try:
@@ -739,17 +780,24 @@ class DirectSyncWorkerThread(QThread):
             self.progress.emit(f"── {verb} remote machine ──")
             if self.operation == "push":
                 self.sync_obj.push_path(self.local_path, self.remote_path,
-                                        on_line=self.progress.emit)
-                self.finished.emit(True, "Push complete.")
+                                        on_line=self.progress.emit,
+                                        on_proc=self._store_proc,
+                                        cancelled=lambda: self._cancelled)
             else:
                 self.sync_obj.pull_path(self.remote_path, self.local_path,
-                                        on_line=self.progress.emit)
-                self.finished.emit(True, "Pull complete.")
+                                        on_line=self.progress.emit,
+                                        on_proc=self._store_proc,
+                                        cancelled=lambda: self._cancelled)
+            if self._cancelled:
+                self.finished.emit(False, "Cancelled.")
+            else:
+                self.finished.emit(True, "Push complete." if self.operation == "push" else "Pull complete.")
         except Exception as exc:
             import traceback
             traceback.print_exc()
-            self.progress.emit(f"ERROR: {exc}")
-            self.finished.emit(False, str(exc))
+            errmsg = "Cancelled." if self._cancelled else str(exc)
+            self.progress.emit(f"✗ {errmsg}")
+            self.finished.emit(False, errmsg)
 
 
 class ConnectionTestThread(QThread):
@@ -1666,8 +1714,6 @@ class SyncApp(QMainWindow):
         local_path  = src  if operation == "push" else dest
         remote_path = dest if operation == "push" else src
 
-        self.sync_button.setEnabled(False)
-        self.pull_dest_btn.setEnabled(False)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
         self.direct_sync_status_label.setVisible(True)
@@ -1677,6 +1723,29 @@ class SyncApp(QMainWindow):
         self._direct_worker.progress.connect(self._on_direct_sync_progress)
         self._direct_worker.finished.connect(self._on_direct_sync_finished)
         self._direct_worker.start()
+
+        # Turn the active button into a Cancel button; disable the other
+        if operation == "push":
+            self.sync_button.setEnabled(True)
+            self.sync_button.setText("⏹  Cancel Push")
+            self.sync_button.setStyleSheet("background-color: #8a3a3a; color: white;")
+            try:
+                self.sync_button.clicked.disconnect()
+            except Exception:
+                pass
+            self.sync_button.clicked.connect(self._cancel_direct_sync)
+            self.pull_dest_btn.setEnabled(False)
+        else:
+            self.pull_dest_btn.setVisible(True)
+            self.pull_dest_btn.setEnabled(True)
+            self.pull_dest_btn.setText("⏹  Cancel Pull")
+            self.pull_dest_btn.setStyleSheet("background-color: #8a3a3a; color: white;")
+            try:
+                self.pull_dest_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.pull_dest_btn.clicked.connect(self._cancel_direct_sync)
+            self.sync_button.setEnabled(False)
 
     def _log_append(self, msg: str):
         """Append a line to the sync log panel."""
@@ -1690,15 +1759,38 @@ class SyncApp(QMainWindow):
         self._log_append(msg)
 
     def _on_direct_sync_finished(self, ok: bool, msg: str):
+        # Restore both buttons to their default state
+        try:
+            self.sync_button.clicked.disconnect()
+        except Exception:
+            pass
+        self.sync_button.clicked.connect(self.start_sync)
+        self.sync_button.setText("⬆  Push to Dest")
+        self.sync_button.setStyleSheet("background-color: #3a5a8a; color: white;")
         self.sync_button.setEnabled(True)
+
+        try:
+            self.pull_dest_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.pull_dest_btn.clicked.connect(self.pull_from_dest)
+        self.pull_dest_btn.setText("⬇  Pull from Dest")
+        self.pull_dest_btn.setStyleSheet("background-color: #3a6a4a; color: white;")
         self.pull_dest_btn.setEnabled(True)
+
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100 if ok else 0)
         QTimer.singleShot(2000, lambda: self.progress_bar.setVisible(False))
-        color = "#7ed6a9" if ok else "red"
+        color = "#7ed6a9" if ok else ("orange" if msg == "Cancelled." else "red")
         self.direct_sync_status_label.setText(("✓ " if ok else "✗ ") + msg)
         self.direct_sync_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
         self._log_append(("✓ " if ok else "✗ ") + msg)
+
+    def _cancel_direct_sync(self):
+        worker = getattr(self, "_direct_worker", None)
+        if worker and worker.isRunning():
+            self._log_append("── Cancelling…")
+            worker.cancel()
 
     def pull_from_dest(self):
         self._start_direct_sync("pull")
@@ -1874,12 +1966,37 @@ class SyncApp(QMainWindow):
         )
         self.cloud_worker.start()
 
+        # Turn the active button into a Cancel button
+        if operation == "upload":
+            self.push_cloud_btn.setEnabled(True)
+            self.push_cloud_btn.setText("⏹  Cancel Push")
+            self.push_cloud_btn.setStyleSheet("background-color: #8a3a3a; color: white;")
+            try:
+                self.push_cloud_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.push_cloud_btn.clicked.connect(self._cancel_cloud_sync)
+            self.pull_cloud_btn.setEnabled(False)
+        else:
+            self.pull_cloud_btn.setEnabled(True)
+            self.pull_cloud_btn.setText("⏹  Cancel Pull")
+            self.pull_cloud_btn.setStyleSheet("background-color: #8a3a3a; color: white;")
+            try:
+                self.pull_cloud_btn.clicked.disconnect()
+            except Exception:
+                pass
+            self.pull_cloud_btn.clicked.connect(self._cancel_cloud_sync)
+            self.push_cloud_btn.setEnabled(False)
+
     def _on_cloud_op_finished(self, ok: bool, msg: str, remaining: list,
                                operation: str, local_path: str, cloud_folder: str):
-        if not ok:
-            self._log_append(f"ERROR: {msg}")
-            self.cloud_op_status_label.setText(f"Error: {msg[:80]}")
-            self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: red;")
+        cancelled = getattr(self, "_cloud_cancelled", False)
+        if not ok or cancelled:
+            label = "Cancelled." if cancelled or msg == "Cancelled." else f"Error: {msg[:80]}"
+            color  = "orange" if cancelled or msg == "Cancelled." else "red"
+            self._log_append(("✗ " if not ok else "⏹ ") + (msg if not cancelled else "Cancelled."))
+            self.cloud_op_status_label.setText(label)
+            self.cloud_op_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
             self._reset_cloud_buttons()
             return
 
@@ -1900,8 +2017,30 @@ class SyncApp(QMainWindow):
             self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
             self._reset_cloud_buttons()
 
+    def _cancel_cloud_sync(self):
+        self._cloud_cancelled = True
+        worker = self.cloud_worker
+        if worker and worker.isRunning():
+            self._log_append("── Cancelling cloud sync…")
+            worker.cancel()
+
     def _reset_cloud_buttons(self):
+        self._cloud_cancelled = False
+        try:
+            self.push_cloud_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.push_cloud_btn.clicked.connect(self.push_to_cloud)
+        self.push_cloud_btn.setText("⬆  Push to Cloud")
+        self.push_cloud_btn.setStyleSheet("background-color: #2a5f8a; color: white;")
         self.push_cloud_btn.setEnabled(True)
+        try:
+            self.pull_cloud_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.pull_cloud_btn.clicked.connect(self.pull_from_cloud)
+        self.pull_cloud_btn.setText("⬇  Pull from Cloud")
+        self.pull_cloud_btn.setStyleSheet("background-color: #2a6b4a; color: white;")
         self.pull_cloud_btn.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setVisible(False)
