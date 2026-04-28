@@ -1123,7 +1123,7 @@ class SyncApp(QMainWindow):
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(10, 5, 10, 5)
-        content_layout.setSpacing(10)
+        content_layout.setSpacing(5)
 
         description_label = QLabel(
             "Select your game, choose the destination machine, and start syncing your game files effortlessly."
@@ -1440,7 +1440,7 @@ class SyncApp(QMainWindow):
         self.dest_ssh_section = QWidget()
         self.dest_ssh_section.setVisible(False)
         dest_ssh_layout = QVBoxLayout(self.dest_ssh_section)
-        dest_ssh_layout.setContentsMargins(0, 4, 0, 0)
+        dest_ssh_layout.setContentsMargins(30, 4, 30, 0)
         dest_ssh_layout.setSpacing(4)
 
         dest_ssh_header = QLabel("— Destination Machine SSH Credentials —")
@@ -1546,6 +1546,9 @@ class SyncApp(QMainWindow):
         self.dest_default_btn.clicked.connect(self._set_default_dest_path)
         dest_row.addWidget(self.dest_default_btn)
         content_layout.addLayout(dest_row)
+        self.dest_label.setVisible(False)
+        self.dest_path.setVisible(False)
+        self.dest_default_btn.setVisible(False)
 
         # ── Sync Direction ────────────────────────────────────────────────────
         self.sync_direction_label = QLabel("Sync Direction:")
@@ -1573,6 +1576,7 @@ class SyncApp(QMainWindow):
         # ── Sync Button ───────────────────────────────────────────────────────
         self.sync_button = QPushButton("⬆  Push to Dest")
         self.sync_button.setStyleSheet("background-color: #3a5a8a; color: white;")
+        self.sync_button.setVisible(False)
         self.sync_button.clicked.connect(self.start_sync)
 
         self.pull_dest_btn = QPushButton("⬇  Pull from Dest")
@@ -1600,16 +1604,6 @@ class SyncApp(QMainWindow):
         self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
         self.cloud_op_status_label.setVisible(False)
 
-        warning_label = QLabel(
-            "Syncing large game files may take time. Please be patient and do not interrupt the process."
-        )
-        warning_label.setStyleSheet("font-size: 10px; color: orange;")
-        warning_label.setWordWrap(False)
-        warning_label.setSizePolicy(
-            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        )
-        content_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
-
         sync_btn_row = QHBoxLayout()
         sync_btn_row.addWidget(self.pull_dest_btn)
         sync_btn_row.addWidget(self.sync_button)
@@ -1623,6 +1617,19 @@ class SyncApp(QMainWindow):
             self.direct_sync_status_label, alignment=Qt.AlignmentFlag.AlignCenter
         )
 
+        # ── Warning Label (large files warning) ────────────────────────────────
+        warning_label = QLabel(
+            "Syncing large game files may take time. Please be patient and do not interrupt the process."
+        )
+        warning_label.setStyleSheet("font-size: 10px; color: orange;")
+        warning_label.setWordWrap(False)
+        warning_label.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        )
+        
+        content_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        warning_label.setVisible(False)  # only show when sync starts
+        
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -1698,9 +1705,9 @@ class SyncApp(QMainWindow):
         self.sync_direction_dropdown.setVisible(False)
         self.dest_machine_widget.setVisible(not cloud_on)
         self.dest_ssh_section.setVisible(not cloud_on and dest_selected)
-        self.dest_label.setVisible(not cloud_on)
-        self.dest_path.setVisible(not cloud_on)
-        self.dest_default_btn.setVisible(not cloud_on)
+        self.dest_label.setVisible(not cloud_on and dest_selected)
+        self.dest_path.setVisible(not cloud_on and dest_selected)
+        self.dest_default_btn.setVisible(not cloud_on and dest_selected)
         if cloud_on:
             self._refresh_cloud_folder_default()
         self.save_settings()
@@ -1917,6 +1924,7 @@ class SyncApp(QMainWindow):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
         self.direct_sync_status_label.setVisible(True)
+        self.warning_label.setVisible(True)
         self.save_settings()
 
         self._direct_worker = DirectSyncWorkerThread(
@@ -1938,6 +1946,7 @@ class SyncApp(QMainWindow):
             self.sync_button.clicked.connect(self._cancel_direct_sync)
             self.pull_dest_btn.setEnabled(False)
         else:
+            self.sync_button.setVisible(True)
             self.pull_dest_btn.setVisible(True)
             self.pull_dest_btn.setEnabled(True)
             self.pull_dest_btn.setText("⏹  Cancel Pull")
@@ -2214,6 +2223,7 @@ class SyncApp(QMainWindow):
         self.pull_cloud_btn.setEnabled(False)
         self.cloud_op_status_label.setText(f"{operation.title()}ing via {name}…")
         self.progress_bar.setVisible(True)
+        self.warning_label.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
         self.cloud_worker = CloudWorkerThread(
@@ -2329,6 +2339,7 @@ class SyncApp(QMainWindow):
         self.pull_cloud_btn.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setVisible(False)
+        self.warning_label.setVisible(False)
 
     # ── Local network machine helpers ─────────────────────────────────────────
 
@@ -2641,7 +2652,11 @@ class SyncApp(QMainWindow):
             self._current_dest_ip = ""
             self.dest_ssh_section.setVisible(False)
             self.pull_dest_btn.setVisible(False)
+            self.sync_button.setVisible(False)
             self.direct_sync_status_label.setVisible(False)
+            self.dest_label.setVisible(False)
+            self.dest_path.setVisible(False)
+            self.dest_default_btn.setVisible(False)
             self._update_scan_button_label()
             return
 
@@ -2673,7 +2688,11 @@ class SyncApp(QMainWindow):
         cloud_on = self.cloud_enabled_checkbox.isChecked()
         self.dest_ssh_section.setVisible(not cloud_on)
         self.pull_dest_btn.setVisible(not cloud_on)
+        self.sync_button.setVisible(not cloud_on)
         self.direct_sync_status_label.setVisible(not cloud_on)
+        self.dest_label.setVisible(not cloud_on)
+        self.dest_path.setVisible(not cloud_on)
+        self.dest_default_btn.setVisible(not cloud_on)
 
         # Load saved credentials for this destination machine
         saved_creds = self.previous_paths.get("dest_machine_creds", {}).get(
