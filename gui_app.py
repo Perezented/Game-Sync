@@ -686,6 +686,22 @@ class DirectSyncWorkerThread(QThread):
             self.finished.emit(False, str(exc))
 
 
+class ConnectionTestThread(QThread):
+    """Tests an SSH connection on a background thread and emits the result."""
+    finished = pyqtSignal(bool, str)  # ok, message
+
+    def __init__(self, sync_obj: LocalNetworkSync):
+        super().__init__()
+        self.sync_obj = sync_obj
+
+    def run(self):
+        try:
+            ok, msg = self.sync_obj.test_connection()
+        except Exception as exc:
+            ok, msg = False, str(exc)
+        self.finished.emit(ok, msg)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SyncApp(QMainWindow):
@@ -1496,27 +1512,31 @@ class SyncApp(QMainWindow):
                 return
 
         self.dest_ssh_test_btn.setEnabled(False)
+        self.dest_ssh_test_btn.setStyleSheet("")
+        self.dest_ssh_user_input.setStyleSheet("")
         self.dest_ssh_status_label.setText("Testing…")
         self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
         self.dest_ssh_progress.setVisible(True)
 
-        import threading  # noqa: PLC0415
-        def _run():
-            try:
-                ok, msg = sync_obj.test_connection()
-            except Exception as exc:
-                ok, msg = False, str(exc)
-            color = "#7ed6a9" if ok else "red"
-            QTimer.singleShot(0, lambda: self._on_dest_test_done(ok, msg, color))
-        threading.Thread(target=_run, daemon=True).start()
+        print(f"[dest_test] spawning thread: ip={sync_obj.ip!r} port={sync_obj.ssh_port} user={sync_obj.username!r} key={sync_obj.ssh_key!r} has_pw={bool(sync_obj.ssh_password)}")
+        self._dest_test_thread = ConnectionTestThread(sync_obj)
+        self._dest_test_thread.finished.connect(self._on_dest_test_done)
+        self._dest_test_thread.start()
 
-    def _on_dest_test_done(self, ok: bool, msg: str, color: str):
+    def _on_dest_test_done(self, ok: bool, msg: str):
         self.dest_ssh_test_btn.setEnabled(True)
         self.dest_ssh_progress.setVisible(False)
-        self.dest_ssh_status_label.setText(("✓ " if ok else "✗ ") + msg[:70])
-        self.dest_ssh_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
         if ok:
+            self.dest_ssh_status_label.setText("✓ " + msg[:70])
+            self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+            self.dest_ssh_test_btn.setStyleSheet("border: 2px solid #7ed6a9;")
+            self.dest_ssh_user_input.setStyleSheet("")
             self.save_settings()
+        else:
+            self.dest_ssh_status_label.setText("✗ " + msg[:70])
+            self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: red;")
+            self.dest_ssh_test_btn.setStyleSheet("border: 2px solid red;")
+            self.dest_ssh_user_input.setStyleSheet("border: 1px solid red;")
 
     # ── Direct machine-to-machine sync ────────────────────────────────────────
 
@@ -1885,28 +1905,29 @@ class SyncApp(QMainWindow):
             self.local_network_sync.ssh_password = password
 
         self.lm_test_btn.setEnabled(False)
+        self.lm_test_btn.setStyleSheet("")
         self.lm_status_label.setText("Testing…")
         self.lm_status_label.setStyleSheet("font-size: 10px; color: lightgray;")
         self.lm_scan_progress.setVisible(True)
 
-        import threading  # noqa: PLC0415
         obj = self.local_network_sync
-        def _run():
-            try:
-                ok, msg = obj.test_connection()
-            except Exception as exc:
-                ok, msg = False, str(exc)
-            color = "#7ed6a9" if ok else "red"
-            QTimer.singleShot(0, lambda: self._on_lm_test_done(ok, msg, color))
-        threading.Thread(target=_run, daemon=True).start()
+        print(f"[lm_test] spawning thread: ip={obj.ip!r} port={obj.ssh_port} user={obj.username!r} key={obj.ssh_key!r} has_pw={bool(obj.ssh_password)}")
+        self._lm_test_thread = ConnectionTestThread(obj)
+        self._lm_test_thread.finished.connect(self._on_lm_test_done)
+        self._lm_test_thread.start()
 
-    def _on_lm_test_done(self, ok: bool, msg: str, color: str):
+    def _on_lm_test_done(self, ok: bool, msg: str):
         self.lm_test_btn.setEnabled(True)
         self.lm_scan_progress.setVisible(False)
-        self.lm_status_label.setText(("✓ " if ok else "✗ ") + msg[:70])
-        self.lm_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
         if ok:
+            self.lm_status_label.setText("✓ " + msg[:70])
+            self.lm_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
+            self.lm_test_btn.setStyleSheet("border: 2px solid #7ed6a9;")
             self.save_settings()
+        else:
+            self.lm_status_label.setText("✗ " + msg[:70])
+            self.lm_status_label.setStyleSheet("font-size: 10px; color: red;")
+            self.lm_test_btn.setStyleSheet("border: 2px solid red;")
 
     # ── Network scan ──────────────────────────────────────────────────────────
 
@@ -2053,6 +2074,10 @@ class SyncApp(QMainWindow):
         self.dest_password = ""
         self.dest_ssh_pass_btn.setText("Set Password")
         self.dest_ssh_pass_btn.setStyleSheet("")
+        self.dest_ssh_test_btn.setStyleSheet("")
+        self.dest_ssh_user_input.setStyleSheet("")
+        self.dest_ssh_status_label.setText("Not tested")
+        self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: gray;")
 
         # Update in-memory record of last destination before setting direction
         # and paths so that _game_machine_key() returns the correct key when
