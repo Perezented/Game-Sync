@@ -411,9 +411,17 @@ class LocalNetworkSync:
     def is_authenticated(self) -> bool:
         return bool(self.ip and self.username)
 
-    def _ssh_opts(self) -> list[str]:
-        opts = ["-p", str(self.ssh_port), "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5"]
+    def _ssh_opts(self, batch_mode: bool = False) -> list[str]:
+        opts = [
+            "-p", str(self.ssh_port),
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR",
+            "-o", "PreferredAuthentications=publickey,password",
+        ]
+        if batch_mode:
+            opts += ["-o", "BatchMode=yes"]
         if self.ssh_key:
             opts += ["-i", self.ssh_key]
         return opts
@@ -435,32 +443,43 @@ class LocalNetworkSync:
         return f"{self.username}@{self.ip}:{self.remote_base}/{subpath.lstrip('/')}"
 
     def test_connection(self) -> tuple[bool, str]:
-        if self.ssh_password and PARAMIKO_AVAILABLE:
+        if PARAMIKO_AVAILABLE:
             try:
                 client = paramiko.SSHClient()
                 client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(
-                    hostname=self.ip,
-                    port=self.ssh_port,
-                    username=self.username,
-                    password=self.ssh_password,
-                    look_for_keys=False,
-                    allow_agent=False,
-                    timeout=8,
-                )
+                connect_kwargs = {
+                    "hostname": self.ip,
+                    "port": self.ssh_port,
+                    "username": self.username,
+                    "timeout": 8,
+                    "look_for_keys": False,
+                    "allow_agent": False,
+                }
+                if self.ssh_key:
+                    connect_kwargs["key_filename"] = self.ssh_key
+                if self.ssh_password:
+                    connect_kwargs["password"] = self.ssh_password
+                client.connect(**connect_kwargs)
                 client.close()
                 return True, "Connection successful."
             except Exception as exc:
                 return False, str(exc)
 
         try:
-            cmd = self._with_password(["ssh"] + self._ssh_opts() + [
+            batch_mode = not bool(self.ssh_password)
+            cmd = self._with_password(["ssh"] + self._ssh_opts(batch_mode=batch_mode) + [
                 f"{self.username}@{self.ip}", "echo OK"
             ])
         except Exception as exc:
             return False, str(exc)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                stdin=subprocess.DEVNULL,
+            )
             if result.returncode == 0:
                 return True, "Connection successful."
             return False, result.stderr.strip() or "Connection failed."
@@ -547,12 +566,12 @@ class LocalNetworkSync:
         dest  = self._remote_addr(cloud_folder)
         rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
         if rsync:
-            ssh_cmd = "ssh " + " ".join(self._ssh_opts())
+            ssh_cmd = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
             cmd = ["rsync", "-az", "--mkpath", "-e", ssh_cmd,
                    str(lp) + ("/" if lp.is_dir() else ""),
                    dest]
         else:
-            cmd = ["scp"] + self._ssh_opts() + ["-r", str(lp), dest]
+            cmd = ["scp"] + self._ssh_opts(batch_mode=True) + ["-r", str(lp), dest]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
@@ -579,10 +598,10 @@ class LocalNetworkSync:
         src   = self._remote_addr(cloud_folder)
         rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
         if rsync:
-            ssh_cmd = "ssh " + " ".join(self._ssh_opts())
+            ssh_cmd = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
             cmd = ["rsync", "-az", "-e", ssh_cmd, src + "/", str(lp)]
         else:
-            cmd = ["scp"] + self._ssh_opts() + ["-r", src, str(lp)]
+            cmd = ["scp"] + self._ssh_opts(batch_mode=True) + ["-r", src, str(lp)]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or f"Transfer failed (exit {result.returncode})")
