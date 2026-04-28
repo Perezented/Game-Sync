@@ -1500,11 +1500,27 @@ class SyncApp(QMainWindow):
 
         content_layout.addWidget(self.dest_ssh_section)
         
-        content_layout.addSpacing(10)
-        # add line spacer between
-        content_layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine, styleSheet="color: #555;"), 1)
-        content_layout.addSpacing(10)
-        
+        # ── Separator block shown only when cloud storage is disabled ─────────
+        self.direct_only_top_spacer = QWidget()
+        self.direct_only_top_spacer.setFixedHeight(10)
+        content_layout.addWidget(self.direct_only_top_spacer)
+
+        self.direct_only_separator = QFrame(frameShape=QFrame.Shape.HLine)
+        self.direct_only_separator.setStyleSheet("color: #555;")
+        content_layout.addWidget(self.direct_only_separator, 1)
+
+        self.direct_only_bottom_spacer = QWidget()
+        self.direct_only_bottom_spacer.setFixedHeight(10)
+        content_layout.addWidget(self.direct_only_bottom_spacer)
+
+        def _set_direct_only_sep_visible(enabled_cloud: bool):
+            show = not enabled_cloud
+            self.direct_only_top_spacer.setVisible(show)
+            self.direct_only_separator.setVisible(show)
+            self.direct_only_bottom_spacer.setVisible(show)
+
+        _set_direct_only_sep_visible(self.cloud_enabled_checkbox.isChecked())
+        self.cloud_enabled_checkbox.toggled.connect(_set_direct_only_sep_visible)
         # ── Source Path ───────────────────────────────────────────────────────
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
