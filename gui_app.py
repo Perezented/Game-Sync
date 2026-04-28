@@ -675,21 +675,13 @@ class SyncApp(QMainWindow):
             self.showMaximized()
 
     def get_settings_file_path(self):
-        old_name = "zomboid_sync_settings.json"
-        new_name = "game_sync_settings.json"
+        game_sync_settings = "game_sync_settings.json"
         if platform.system() == "Windows":
             base = Path(os.getenv("APPDATA", "~"))
         else:
             base = Path.home()
 
-        new_path = base / new_name
-        old_path = base / old_name
-        if old_path.exists() and not new_path.exists():
-            try:
-                old_path.rename(new_path)
-            except Exception:
-                pass
-        return new_path
+        return base / game_sync_settings
 
     def _get_local_ip(self):
         try:
@@ -1740,13 +1732,17 @@ class SyncApp(QMainWindow):
         self._current_dest_mac = dest_mac
         self._current_dest_ip  = dest_ip
 
-        # Persist the last chosen destination so we can re-select it next launch
+        # Update in-memory record of last destination before setting direction
+        # and paths so that _game_machine_key() returns the correct key when
+        # update_paths() / save_settings() are called below.
         self.previous_paths["last_dest_mac"] = dest_mac
         self.previous_paths["last_dest_ip"]  = dest_ip
-        self.save_settings()
 
         self._set_sync_direction(self.local_os, remote_os)
         self.update_paths()
+        # Save AFTER paths have been recalculated for the correct destination OS,
+        # so we never persist stale (wrong-OS) paths under this machine's key.
+        self.save_settings()
         self._update_scan_button_label()
 
     # ── OS / path helpers ─────────────────────────────────────────────────────
