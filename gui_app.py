@@ -644,6 +644,7 @@ class SyncApp(QMainWindow):
         self.sync_direction_dropdown.currentIndexChanged.connect(self._on_game_or_direction_changed)
         self.source_path.editingFinished.connect(self.save_settings)
         self.dest_path.editingFinished.connect(self.save_settings)
+        self.cloud_folder_input.editingFinished.connect(self.save_settings)
 
         self.scan_active = False
         self.sync_active = False
@@ -655,6 +656,8 @@ class SyncApp(QMainWindow):
         self.scan_timer.start()
         if self._should_auto_scan_network():
             self.start_network_scan()
+
+        self._last_game_selected = self.game_dropdown.currentText()
 
         # ── Cloud state ───────────────────────────────────────────────────────
         self.gdrive_sync:       GoogleDriveSync    | None = None
@@ -1228,9 +1231,16 @@ class SyncApp(QMainWindow):
         self.gd_credentials_widget.setVisible(btn_id == 1)  # 1 = manual creds
 
     def _refresh_cloud_folder_default(self):
-        """Populate cloud folder with /GameSync/<game>/ if the field is empty."""
-        if not self.cloud_folder_input.text():
-            game = self.game_dropdown.currentText() or "Game"
+        """Populate cloud folder with a game-specific saved path or default value."""
+        game = self.game_dropdown.currentText() or "Game"
+        saved_clouds = self.previous_paths.get("game_cloud_folders", {})
+        saved_folder = saved_clouds.get(game)
+        if saved_folder:
+            self.cloud_folder_input.setText(saved_folder)
+            return
+
+        current = self.cloud_folder_input.text().strip()
+        if not current or current.startswith("/GameSync/"):
             self.cloud_folder_input.setText(f"/GameSync/{game}/")
 
     def _refresh_local_machine_scan_state(self):
@@ -1766,6 +1776,8 @@ class SyncApp(QMainWindow):
                     btn.setChecked(True)
 
                 self.cloud_folder_input.setText(self.previous_paths.get("cloud_folder", ""))
+                self._refresh_cloud_folder_default()
+                self._last_game_selected = self.game_dropdown.currentText()
 
                 # Google Drive
                 self.gd_client_id_input.setText(self.previous_paths.get("gdrive_client_id", ""))
@@ -1825,6 +1837,10 @@ class SyncApp(QMainWindow):
         """Called when the game or sync-direction dropdown changes."""
         if getattr(self, "_loading", False):
             return
+        current_game = self.game_dropdown.currentText()
+        if current_game != getattr(self, "_last_game_selected", ""):
+            self._refresh_cloud_folder_default()
+            self._last_game_selected = current_game
         self.update_paths()
         self.save_settings()
 
@@ -1862,9 +1878,6 @@ class SyncApp(QMainWindow):
         self.source_path.setText(src)
         self.dest_path.setText(dst)
 
-        # Refresh cloud folder default whenever the game changes
-        self._refresh_cloud_folder_default()
-
     def save_settings(self):
         if getattr(self, "_loading", False):
             return
@@ -1884,6 +1897,11 @@ class SyncApp(QMainWindow):
             "sync_direction": self.sync_direction_dropdown.currentText(),
         }
         settings["game_machine_paths"] = game_machine_paths
+
+        # ── Game-specific cloud folder persistence ─────────────────────────────
+        game_cloud_folders = settings.get("game_cloud_folders", {})
+        game_cloud_folders[self.game_dropdown.currentText() or "__unknown__"] = self.cloud_folder_input.text()
+        settings["game_cloud_folders"] = game_cloud_folders
 
         # ── Last destination machine ──────────────────────────────────────────
         if self._current_dest_mac:
