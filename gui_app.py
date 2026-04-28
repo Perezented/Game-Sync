@@ -204,6 +204,8 @@ class RcloneSync:
     ):
         cfg = self._write_config()
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+        if on_line:
+            on_line(f"[rclone upload] {local_path!r}  →  {remote!r}")
         self._run(
             [
                 "rclone",
@@ -212,6 +214,7 @@ class RcloneSync:
                 str(cfg),
                 str(local_path),
                 remote,
+                "-v",
                 "--stats-one-line-date",
             ],
             on_line,
@@ -225,6 +228,8 @@ class RcloneSync:
         cfg = self._write_config()
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         Path(local_path).mkdir(parents=True, exist_ok=True)
+        if on_line:
+            on_line(f"[rclone download] {remote!r}  →  {local_path!r}")
         self._run(
             [
                 "rclone",
@@ -233,6 +238,7 @@ class RcloneSync:
                 str(cfg),
                 remote,
                 str(local_path),
+                "-v",
                 "--stats-one-line-date",
             ],
             on_line,
@@ -1212,6 +1218,14 @@ class SyncApp(QMainWindow):
         )
         _banner_text.setWordWrap(True)
         _banner_row.addWidget(_banner_text, 1)
+        _banner_check_btn = QPushButton("↺ Check Again")
+        _banner_check_btn.setFixedWidth(100)
+        _banner_check_btn.setStyleSheet(
+            "QPushButton { background: #5a3a00; color: #ffd080; border: 1px solid #a06000; font-size: 10px; }"
+            "QPushButton:hover { background: #7a5000; }"
+        )
+        _banner_check_btn.clicked.connect(self._refresh_rclone_banner)
+        _banner_row.addWidget(_banner_check_btn)
         self.rclone_banner.setLayout(_banner_row)
         self.rclone_banner.setVisible(False)  # refreshed on show
         cloud_layout.addWidget(self.rclone_banner)
@@ -2250,12 +2264,28 @@ class SyncApp(QMainWindow):
 
         def _run():
             try:
+                # Kill any lingering rclone authorize process holding port 53682
+                try:
+                    if platform.system() == "Windows":
+                        subprocess.run(
+                            ["taskkill", "/F", "/IM", "rclone.exe"],
+                            capture_output=True,
+                        )
+                    else:
+                        subprocess.run(
+                            ["pkill", "-f", "rclone authorize"],
+                            capture_output=True,
+                        )
+                except Exception:
+                    pass
+                import time as _time
+                _time.sleep(0.5)  # give the OS a moment to release the port
+
                 result = subprocess.run(
                     [
                         "rclone",
                         "authorize",
                         _rclone_type,
-                        "--auth-no-open-browser=false",
                     ],
                     capture_output=True,
                     text=True,
@@ -2270,19 +2300,18 @@ class SyncApp(QMainWindow):
                         .strip()
                     )
                 else:
-                    # Fallback: try regex for slightly different rclone output formats
-                    m = _re.search(
-                        r"--->(\s*\{.*?\}\s*)<---End paste", output, _re.DOTALL
-                    )
+                    # Fallback: find any JSON object in the output
+                    m = _re.search(r'(\{[^{}]*"access_token"[^{}]*\})', output, _re.DOTALL)
                     if m:
                         token_json = m.group(1).strip()
                     else:
                         raise RuntimeError(
-                            f"Could not parse rclone token.\nOutput was:\n{output[-300:]}"
+                            f"Could not parse rclone token (exit={result.returncode}).\n"
+                            f"Full output:\n{output}"
                         )
                 self._rclone_auth_token.emit(_provider, token_json)
             except Exception as exc:
-                self._rclone_auth_err.emit(_provider, str(exc)[:200])
+                self._rclone_auth_err.emit(_provider, str(exc)[:2000])
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -2358,8 +2387,16 @@ class SyncApp(QMainWindow):
             self.gd_connect_btn if provider == "gdrive" else self.db_connect_btn
         )
         connect_btn.setEnabled(True)
-        status_label.setText(f"Error: {msg}")
+        short = msg[:80] + ("…" if len(msg) > 80 else "")
+        status_label.setText(f"Auth error — {short}")
         status_label.setStyleSheet("font-size: 10px; color: red;")
+        err_box = QMessageBox(self)
+        err_box.setWindowTitle("rclone Authorization Error")
+        err_box.setIcon(QMessageBox.Icon.Critical)
+        err_box.setText("rclone authorization failed.")
+        err_box.setDetailedText(msg)
+        err_box.exec()
+        self._log_append(f"[rclone auth error — {provider}]\n{msg}")
 
     # ── Cloud push / pull ─────────────────────────────────────────────────────
 
