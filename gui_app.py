@@ -528,15 +528,29 @@ class LocalNetworkSync:
                 sftp.mkdir(path)
 
     def _sftp_put_recursive(self, sftp, local: Path, remote: str, on_line=None, cancelled=None):
-        """Upload local file or directory tree to remote path via SFTP."""
+        """Upload local file or directory tree to remote path via SFTP.
+
+        Mirrors rsync --update: skips files where the destination is newer.
+        """
         if cancelled and cancelled():
             raise RuntimeError("Cancelled.")
         self._sftp_mkdir_p(sftp, remote)
         if local.is_file():
             dest = f"{remote}/{local.name}"
-            if on_line:
-                on_line(f"  sending {local.name}")
-            sftp.put(str(local), dest)
+            skip = False
+            try:
+                remote_attr = sftp.stat(dest)
+                if remote_attr.st_mtime >= local.stat().st_mtime:
+                    skip = True
+            except FileNotFoundError:
+                pass
+            if skip:
+                if on_line:
+                    on_line(f"  skipping {local.name} (destination is newer or same)")
+            else:
+                if on_line:
+                    on_line(f"  sending {local.name}")
+                sftp.put(str(local), dest)
         else:
             for item in local.iterdir():
                 if cancelled and cancelled():
@@ -546,12 +560,27 @@ class LocalNetworkSync:
                     self._sftp_mkdir_p(sftp, r_sub)
                     self._sftp_put_recursive(sftp, item, r_sub, on_line=on_line, cancelled=cancelled)
                 else:
-                    if on_line:
-                        on_line(f"  sending {item.name}")
-                    sftp.put(str(item), r_sub)
+                    skip = False
+                    try:
+                        remote_attr = sftp.stat(r_sub)
+                        if remote_attr.st_mtime >= item.stat().st_mtime:
+                            skip = True
+                    except FileNotFoundError:
+                        pass
+                    if skip:
+                        if on_line:
+                            on_line(f"  skipping {item.name} (destination is newer or same)")
+                    else:
+                        if on_line:
+                            on_line(f"  sending {item.name}")
+                        sftp.put(str(item), r_sub)
 
     def _sftp_get_recursive(self, sftp, remote: str, local: Path, on_line=None, cancelled=None):
-        """Download remote directory tree to local path via SFTP."""
+        """Download remote directory tree to local path via SFTP.
+
+        Mirrors rsync --update: skips files where the local copy is newer or same.
+        """
+        import stat as _stat
         if cancelled and cancelled():
             raise RuntimeError("Cancelled.")
         local.mkdir(parents=True, exist_ok=True)
@@ -560,13 +589,20 @@ class LocalNetworkSync:
                 raise RuntimeError("Cancelled.")
             r_path = f"{remote}/{entry.filename}"
             l_path = local / entry.filename
-            import stat
-            if stat.S_ISDIR(entry.st_mode):
+            if _stat.S_ISDIR(entry.st_mode):
                 self._sftp_get_recursive(sftp, r_path, l_path, on_line=on_line, cancelled=cancelled)
             else:
-                if on_line:
-                    on_line(f"  receiving {r_path}")
-                sftp.get(r_path, str(l_path))
+                skip = False
+                if l_path.exists():
+                    if l_path.stat().st_mtime >= entry.st_mtime:
+                        skip = True
+                if skip:
+                    if on_line:
+                        on_line(f"  skipping {entry.filename} (local is newer or same)")
+                else:
+                    if on_line:
+                        on_line(f"  receiving {entry.filename}")
+                    sftp.get(r_path, str(l_path))
 
     # ── public transfer methods ────────────────────────────────────────────────
 
