@@ -1239,9 +1239,7 @@ class SyncApp(QMainWindow):
             self.cloud_folder_input.setText(saved_folder)
             return
 
-        current = self.cloud_folder_input.text().strip()
-        if not current or current.startswith("/GameSync/"):
-            self.cloud_folder_input.setText(f"/GameSync/{game}/")
+        self.cloud_folder_input.setText(f"/GameSync/{game}/")
 
     def _refresh_local_machine_scan_state(self):
         has_hosts = self.lm_host_dropdown.count() > 1
