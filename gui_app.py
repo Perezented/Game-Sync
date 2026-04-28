@@ -598,10 +598,11 @@ class LocalNetworkSync:
                         skip = True
                 if skip:
                     if on_line:
-                        on_line(f"  skipping {entry.filename} (local is newer or same)")
+                        on_line(f"  skipping {r_path} (local is newer or same)")
                 else:
                     if on_line:
-                        on_line(f"  receiving {entry.filename}")
+                        # Show the remote path relative to the remote base for clarity
+                        on_line(f"  receiving {r_path}")
                     sftp.get(r_path, str(l_path))
 
     # ── public transfer methods ────────────────────────────────────────────────
