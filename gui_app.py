@@ -28,6 +28,9 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QSplitter,
     QPlainTextEdit,
+    QTabWidget,
+    QSpinBox,
+    QMessageBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
@@ -658,16 +661,38 @@ class LocalNetworkSync:
     # ── Direct machine-to-machine sync (absolute paths, rsync --update) ────────
 
     def _expand_remote_path(self, client, path: str) -> str:
-        """Expand leading ~ in a remote path by querying $HOME via SSH."""
-        if not path.startswith("~"):
+        """Expand ~ / $HOME / %USERPROFILE% in a remote path (Linux or Windows remote)."""
+        import re as _re_exp
+
+        # Fast-path: nothing to expand
+        if not path.startswith("~") and "$" not in path and "%" not in path:
             return path
+
+        # ── Step 1: resolve the remote home directory ─────────────────────────
+        # Try POSIX $HOME first (works on Linux/macOS SSH servers).
         _, stdout, _ = client.exec_command("echo $HOME")
         home = stdout.read().decode().strip()
-        if not home:
-            raise RuntimeError(
-                "Could not determine remote home directory (echo $HOME returned empty)."
-            )
-        return home + path[1:]  # replace the leading ~ with actual home
+
+        # If $HOME came back unexpanded (Windows cmd.exe echoes it literally),
+        # try %USERPROFILE% instead.
+        if not home or home == "$HOME":
+            _, stdout, _ = client.exec_command("echo %USERPROFILE%")
+            home = stdout.read().decode().strip()
+
+        # ── Step 2: substitute known patterns ────────────────────────────────
+        if home and home not in ("$HOME", "%USERPROFILE%"):
+            # Use a lambda replacement so backslashes in `home` (Windows paths)
+            # are never interpreted as regex escape sequences.
+            _repl = lambda m: home  # noqa: E731
+            # $HOME / ${HOME}
+            path = _re_exp.sub(r"\$\{?HOME\}?", _repl, path)
+            # %USERPROFILE%
+            path = _re_exp.sub(r"%USERPROFILE%", _repl, path, flags=_re_exp.IGNORECASE)
+            # Leading ~  (must come last so ~/foo still works after $HOME removal)
+            if path.startswith("~"):
+                path = home + path[1:]
+
+        return path
 
     def push_path(
         self,
@@ -959,10 +984,12 @@ class SyncApp(QMainWindow):
         self.scan_performed = False
         self._loading = False
         self.scan_timer = QTimer(self)
-        self.scan_timer.setInterval(60_000)
+        # Apply the saved interval (loaded before scan_timer was created)
+        saved_interval_s = self.settings_scan_interval.value()
+        self.scan_timer.setInterval(max(15, saved_interval_s) * 1000)
         self.scan_timer.timeout.connect(self.on_scan_timer_timeout)
         self.scan_timer.start()
-        if self._should_auto_scan_network():
+        if self._should_auto_scan_network():  # respects saved autoscan checkbox
             self.start_network_scan()
 
         self._last_game_selected = self.game_dropdown.currentText()
@@ -1618,17 +1645,17 @@ class SyncApp(QMainWindow):
         )
 
         # ── Warning Label (large files warning) ────────────────────────────────
-        warning_label = QLabel(
+        self.warning_label = QLabel(
             "Syncing large game files may take time. Please be patient and do not interrupt the process."
         )
-        warning_label.setStyleSheet("font-size: 10px; color: orange;")
-        warning_label.setWordWrap(False)
-        warning_label.setSizePolicy(
+        self.warning_label.setStyleSheet("font-size: 10px; color: orange;")
+        self.warning_label.setWordWrap(False)
+        self.warning_label.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         )
         
-        content_layout.addWidget(warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        warning_label.setVisible(False)  # only show when sync starts
+        content_layout.addWidget(self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.warning_label.setVisible(False)  # only show when sync starts
         
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
@@ -1651,17 +1678,22 @@ class SyncApp(QMainWindow):
             "QWidget { background-color: transparent; }"
         )
 
-        # ── Sync Log (bottom panel, always visible) ───────────────────────────
-        log_container = QWidget()
-        log_container.setStyleSheet("background-color: #2a2a2a;")
-        log_vbox = QVBoxLayout(log_container)
-        log_vbox.setContentsMargins(4, 2, 4, 4)
-        log_vbox.setSpacing(2)
-        log_title = QLabel("Sync Log")
-        log_title.setStyleSheet(
-            "font-size: 10px; color: #aaa; background-color: #2a2a2a;"
+        # ── Footer tab widget ──────────────────────────────────────────────────
+        footer_tabs = QTabWidget()
+        footer_tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #444; background: #2a2a2a; }"
+            "QTabBar::tab { background: #353535; color: #aaa; padding: 4px 12px;"
+            "  border: 1px solid #444; border-bottom: none; margin-right: 2px; }"
+            "QTabBar::tab:selected { background: #2a2a2a; color: white; }"
+            "QTabBar::tab:hover { background: #444; }"
         )
-        log_vbox.addWidget(log_title)
+
+        # ── Tab 1: Sync Log ───────────────────────────────────────────────────
+        log_tab = QWidget()
+        log_tab.setStyleSheet("background-color: #2a2a2a;")
+        log_vbox = QVBoxLayout(log_tab)
+        log_vbox.setContentsMargins(4, 4, 4, 4)
+        log_vbox.setSpacing(2)
         self.sync_log = QPlainTextEdit()
         self.sync_log.setReadOnly(True)
         self.sync_log.setMaximumBlockCount(1000)
@@ -1669,22 +1701,157 @@ class SyncApp(QMainWindow):
             "QPlainTextEdit { background-color: #1e1e1e; color: #d4d4d4;"
             " font-family: monospace; font-size: 11px; border: 1px solid #444; }"
         )
-        # ~5 lines tall as default (line height ≈ 18px + padding)
-        self.sync_log.setMinimumHeight(180)
+        self.sync_log.setMinimumHeight(120)
         log_vbox.addWidget(self.sync_log)
+        footer_tabs.addTab(log_tab, "📋  Sync Log")
 
+        # ── Tab 2: Settings ───────────────────────────────────────────────────
+        settings_tab = QWidget()
+        settings_tab.setStyleSheet("background-color: #2a2a2a;")
+        settings_vbox = QVBoxLayout(settings_tab)
+        settings_vbox.setContentsMargins(12, 8, 12, 8)
+        settings_vbox.setSpacing(8)
+
+        st_header = QLabel("Application Settings")
+        st_header.setStyleSheet("font-size: 13px; font-weight: bold; color: #9fd3ff;")
+        settings_vbox.addWidget(st_header)
+
+        # Auto-scan on startup
+        self.settings_autoscan_cb = QCheckBox("Auto-scan network on startup")
+        self.settings_autoscan_cb.setChecked(True)
+        self.settings_autoscan_cb.setToolTip(
+            "Automatically scan the local network for machines when the app launches."
+        )
+        self.settings_autoscan_cb.toggled.connect(self.save_settings)
+        settings_vbox.addWidget(self.settings_autoscan_cb)
+
+        # Scan interval
+        scan_interval_row = QHBoxLayout()
+        scan_interval_lbl = QLabel("Background scan interval (seconds):")
+        scan_interval_lbl.setFixedWidth(240)
+        scan_interval_row.addWidget(scan_interval_lbl)
+        self.settings_scan_interval = QSpinBox()
+        self.settings_scan_interval.setRange(15, 3600)
+        self.settings_scan_interval.setValue(60)
+        self.settings_scan_interval.setFixedWidth(70)
+        self.settings_scan_interval.setToolTip(
+            "How often (in seconds) the background network re-scan fires."
+        )
+        self.settings_scan_interval.valueChanged.connect(self._on_scan_interval_changed)
+        scan_interval_row.addWidget(self.settings_scan_interval)
+        scan_interval_row.addStretch()
+        settings_vbox.addLayout(scan_interval_row)
+
+        # Confirm before sync
+        self.settings_confirm_sync_cb = QCheckBox("Ask for confirmation before syncing")
+        self.settings_confirm_sync_cb.setChecked(False)
+        self.settings_confirm_sync_cb.setToolTip(
+            "Show a confirmation dialog before each push or pull operation."
+        )
+        self.settings_confirm_sync_cb.toggled.connect(self.save_settings)
+        settings_vbox.addWidget(self.settings_confirm_sync_cb)
+
+        # Show sync log automatically
+        self.settings_autoscroll_cb = QCheckBox("Auto-scroll sync log to latest entry")
+        self.settings_autoscroll_cb.setChecked(True)
+        self.settings_autoscroll_cb.setToolTip(
+            "Keep the sync log scrolled to the most recent line."
+        )
+        self.settings_autoscroll_cb.toggled.connect(self.save_settings)
+        settings_vbox.addWidget(self.settings_autoscroll_cb)
+
+        settings_vbox.addStretch()
+        footer_tabs.addTab(settings_tab, "⚙  Settings")
+        
+        # ── Tab 3: About ──────────────────────────────────────────────────────
+        about_tab = QWidget()
+        about_tab.setStyleSheet("background-color: #2a2a2a;")
+        about_vbox = QVBoxLayout(about_tab)
+        about_vbox.setContentsMargins(16, 10, 16, 10)
+        about_vbox.setSpacing(6)
+
+        about_title = QLabel("Game Sync Tool")
+        about_title.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: white;"
+        )
+        about_vbox.addWidget(about_title)
+
+        about_desc = QLabel(
+            "Game Sync Tool lets you effortlessly transfer game save files between "
+            "machines on your local network or via cloud storage (Google Drive / Dropbox). "
+            "It supports Linux ↔ Windows cross-platform syncing and uses rclone for "
+            "secure, reliable cloud transfers — no developer accounts required."
+        )
+        about_desc.setStyleSheet("font-size: 11px; color: #ccc;")
+        about_desc.setWordWrap(True)
+        about_vbox.addWidget(about_desc)
+
+        about_how_title = QLabel("How to use")
+        about_how_title.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #9fd3ff; margin-top: 4px;"
+        )
+        about_vbox.addWidget(about_how_title)
+
+        how_to_text = QLabel(
+            "1. Select your game from the dropdown.\n"
+            "2. Choose <b>Cloud Storage</b> for cloud/cross-device sync, or leave it "
+            "unchecked for direct LAN push/pull.\n"
+            "3. Scan the network to discover nearby machines, then select a destination.\n"
+            "4. Enter SSH credentials for the destination machine and test the connection.\n"
+            "5. Hit <b>Push to Dest</b> to send saves, or <b>Pull from Dest</b> to receive them."
+        )
+        how_to_text.setStyleSheet("font-size: 10px; color: #bbb;")
+        how_to_text.setWordWrap(True)
+        about_vbox.addWidget(how_to_text)
+
+        about_links_row = QHBoxLayout()
+
+        github_btn = QPushButton("  View on GitHub")
+        github_btn.setStyleSheet(
+            "QPushButton { background-color: #24292e; color: white;"
+            " border: 1px solid #555; padding: 4px 10px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #3a3f44; }"
+        )
+        github_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        github_btn.clicked.connect(
+            lambda: webbrowser.open("https://github.com/Perezented/Game-Sync")
+        )
+        about_links_row.addWidget(github_btn)
+
+        donate_btn = QPushButton("  Donate via PayPal ♥")
+        donate_btn.setStyleSheet(
+            "QPushButton { background-color: #003087; color: white;"
+            " border: 1px solid #0070ba; padding: 4px 10px; font-size: 11px; }"
+            "QPushButton:hover { background-color: #0070ba; }"
+        )
+        donate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        donate_btn.clicked.connect(
+            lambda: webbrowser.open(
+                "https://www.paypal.com/ncp/payment/J4WYMPBFTLBMU"
+            )
+        )
+        about_links_row.addWidget(donate_btn)
+        about_links_row.addStretch()
+        about_vbox.addLayout(about_links_row)
+
+        about_vbox.addStretch()
+        footer_tabs.addTab(about_tab, "ℹ  About")
+
+        # ── Splitter: main scroll area + footer tabs ──────────────────────────
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setStyleSheet(
             "QSplitter::handle { background-color: #555; height: 4px; }"
         )
         splitter.addWidget(scroll_area)
-        splitter.addWidget(log_container)
+        splitter.addWidget(footer_tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([9999, 108])
+        splitter.setSizes([9999, 180])
 
         outer_layout.addWidget(splitter)
         self.setCentralWidget(outer_widget)
+
+
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
 
@@ -1889,6 +2056,17 @@ class SyncApp(QMainWindow):
 
     def _start_direct_sync(self, operation: str):
         """Common launcher for push/pull between this machine and the destination."""
+        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
+            op_label = "Push to destination" if operation == "push" else "Pull from destination"
+            reply = QMessageBox.question(
+                self,
+                "Confirm Sync",
+                f"Are you sure you want to {op_label.lower()}?\nThis will overwrite files at the target.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         src = self.source_path.text().strip()
         dest = self.dest_path.text().strip()
         if not src or not dest:
@@ -1961,9 +2139,10 @@ class SyncApp(QMainWindow):
     def _log_append(self, msg: str):
         """Append a line to the sync log panel."""
         self.sync_log.appendPlainText(msg)
-        # auto-scroll to bottom
-        sb = self.sync_log.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        # auto-scroll to bottom (if setting enabled)
+        if not getattr(self, "settings_autoscroll_cb", None) or self.settings_autoscroll_cb.isChecked():
+            sb = self.sync_log.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     def _on_direct_sync_progress(self, msg: str):
         self.direct_sync_status_label.setText(msg[:120])
@@ -2188,6 +2367,15 @@ class SyncApp(QMainWindow):
         return folder
 
     def push_to_cloud(self):
+        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
+            reply = QMessageBox.question(
+                self, "Confirm Push",
+                "Are you sure you want to push saves to the cloud?\nThis will overwrite files in the cloud folder.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         local_path = self.source_path.text().strip()
         if not local_path:
             self.cloud_op_status_label.setText("Set a Source Path first.")
@@ -2201,6 +2389,15 @@ class SyncApp(QMainWindow):
         self._run_cloud_op("upload", cloud_syncs, local_path)
 
     def pull_from_cloud(self):
+        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
+            reply = QMessageBox.question(
+                self, "Confirm Pull",
+                "Are you sure you want to pull saves from the cloud?\nThis will overwrite local files.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         local_path = self.dest_path.text().strip() or self.source_path.text().strip()
         if not local_path:
             self.cloud_op_status_label.setText("Set a Destination Path first.")
@@ -2492,11 +2689,18 @@ class SyncApp(QMainWindow):
         self.start_network_scan()
 
     def _should_auto_scan_network(self) -> bool:
+        if not getattr(self, "settings_autoscan_cb", None) or not self.settings_autoscan_cb.isChecked():
+            return False
         if self._current_dest_mac:
             return False
         if self.scan_dropdown.count() <= 1 and not self.scan_performed:
             return True
         return False
+
+    def _on_scan_interval_changed(self, value: int):
+        if hasattr(self, "scan_timer"):
+            self.scan_timer.setInterval(value * 1000)
+        self.save_settings()
 
     def _update_scan_button_label(self):
         if self.scan_dropdown.currentIndex() > 0:
@@ -2829,6 +3033,20 @@ class SyncApp(QMainWindow):
                     self.db_logout_btn.setVisible(True)
                     self.db_connect_btn.setText("Re-authorize")
 
+                # ── Application settings tab ────────────────────────────────────
+                self.settings_autoscan_cb.setChecked(
+                    self.previous_paths.get("settings_autoscan", True)
+                )
+                self.settings_scan_interval.setValue(
+                    int(self.previous_paths.get("settings_scan_interval", 60))
+                )
+                self.settings_confirm_sync_cb.setChecked(
+                    self.previous_paths.get("settings_confirm_sync", False)
+                )
+                self.settings_autoscroll_cb.setChecked(
+                    self.previous_paths.get("settings_autoscroll", True)
+                )
+
                 # Local network machine
                 self.lm_username_input.setText(
                     self.previous_paths.get("lm_username", "")
@@ -2951,6 +3169,12 @@ class SyncApp(QMainWindow):
         if self._current_dest_mac:
             settings["last_dest_mac"] = self._current_dest_mac
             settings["last_dest_ip"] = self._current_dest_ip
+
+        # ── Application settings tab ──────────────────────────────────────────
+        settings["settings_autoscan"] = self.settings_autoscan_cb.isChecked()
+        settings["settings_scan_interval"] = self.settings_scan_interval.value()
+        settings["settings_confirm_sync"] = self.settings_confirm_sync_cb.isChecked()
+        settings["settings_autoscroll"] = self.settings_autoscroll_cb.isChecked()
 
         # ── Cloud UI state ────────────────────────────────────────────────────
         settings["cloud_enabled"] = self.cloud_enabled_checkbox.isChecked()

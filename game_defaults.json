@@ -7,13 +7,6 @@
         "linux": "~/Zomboid/Saves",
         "steamdeck": "~/Zomboid/Saves"
       }
-    },
-    {
-      "name": "Another Game",
-      "defaults": {
-        "windows": "%USERPROFILE%\\Documents\\AnotherGame\\SavedGames",
-        "linux": "~/Documents/AnotherGame/SavedGames"
-      }
     }
   ]
 }
