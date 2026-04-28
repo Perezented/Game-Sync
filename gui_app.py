@@ -2293,15 +2293,63 @@ class SyncApp(QMainWindow):
         last_dest_ip  = self.previous_paths.get("last_dest_ip",  "")
         auto_select_index = 0
 
-        for index, (_ip, _os, label, _mac, is_local) in enumerate(self.scanned_hosts, start=1):
-            self.scan_dropdown.addItem(label)
-            if is_local:
-                self.scan_dropdown.setItemData(index, QColor("orange"), Qt.ItemDataRole.ForegroundRole)
-            # Check if this host matches the last-used destination
-            if not is_local and auto_select_index == 0:
-                if (last_dest_mac and _mac and _mac.lower() == last_dest_mac) or \
-                   (last_dest_ip and _ip == last_dest_ip):
-                    auto_select_index = index
+        # ── Group entries by hostname (covers multi-NIC, WiFi+Ethernet+Tailscale) ──
+        import re  # noqa: PLC0415
+        from collections import defaultdict  # noqa: PLC0415
+        from PyQt6.QtGui import QFont        # noqa: PLC0415
+
+        def _extract_hostname(label: str) -> str:
+            """Pull the hostname out of labels like 'IP  (hostname)  [OS]'.
+            Returns the IP itself as a fallback if no parenthetical is found."""
+            m = re.search(r"\(([^)]+)\)", label)
+            if m:
+                # For local-machine labels the parens contain 'hostname / iface'
+                return m.group(1).split("/")[0].strip().lower()
+            return label.split()[0]  # fall back to bare IP
+
+        # hostname → list of scanned_hosts indices
+        hostname_to_indices: dict[str, list[int]] = defaultdict(list)
+        for i, (_ip, _os, _lbl, _mac, _local) in enumerate(prepared_hosts):
+            key = _extract_hostname(_lbl)
+            hostname_to_indices[key].append(i)
+
+        def _add_host_item(host_idx: int, indent: bool = False) -> None:
+            nonlocal auto_select_index
+            h_ip, h_os, h_label, h_mac, h_local = prepared_hosts[host_idx]
+            display = ("    " + h_label) if indent else h_label
+            self.scan_dropdown.addItem(display)
+            di = self.scan_dropdown.count() - 1
+            # Store the scanned_hosts index in UserRole so on_destination_selected
+            # can retrieve it regardless of how many group-header rows were inserted.
+            self.scan_dropdown.setItemData(di, host_idx)
+            if h_local:
+                self.scan_dropdown.setItemData(di, QColor("orange"), Qt.ItemDataRole.ForegroundRole)
+            elif auto_select_index == 0:
+                if (last_dest_mac and h_mac and h_mac == last_dest_mac) or \
+                   (last_dest_ip and h_ip == last_dest_ip):
+                    auto_select_index = di
+
+        for hostname_key, indices in hostname_to_indices.items():
+            if len(indices) > 1:
+                # Header: show the human-readable hostname + interface count
+                # Use the resolved hostname from the first entry's label parenthetical,
+                # falling back to the raw hostname_key.
+                first_label = prepared_hosts[indices[0]][2]
+                m = re.search(r"\(([^)]+)\)", first_label)
+                display_name = m.group(1).split("/")[0].strip() if m else hostname_key
+                self.scan_dropdown.addItem(f"▸  {display_name}  [{len(indices)} interfaces]")
+                hdr_di = self.scan_dropdown.count() - 1
+                self.scan_dropdown.setItemData(hdr_di, -1)  # not a selectable host
+                hdr_item = self.scan_dropdown.model().item(hdr_di)
+                hdr_item.setFlags(Qt.ItemFlag.NoItemFlags)   # not selectable/focusable
+                hdr_item.setForeground(QColor("#aaaaaa"))
+                hdr_font = QFont(hdr_item.font())
+                hdr_font.setItalic(True)
+                hdr_item.setFont(hdr_font)
+                for host_idx in indices:
+                    _add_host_item(host_idx, indent=True)
+            else:
+                _add_host_item(indices[0], indent=False)
 
         self.scan_button.setEnabled(True)
         self._update_scan_button_label()
@@ -2320,7 +2368,7 @@ class SyncApp(QMainWindow):
 
     def on_destination_selected(self, index):
         """Auto-set sync direction and paths when a scanned machine is selected."""
-        if index <= 0 or index > len(self.scanned_hosts):
+        if index <= 0:
             self._current_dest_mac = ""
             self._current_dest_ip  = ""
             self.dest_ssh_section.setVisible(False)
@@ -2329,7 +2377,16 @@ class SyncApp(QMainWindow):
             self._update_scan_button_label()
             return
 
-        dest_ip, remote_os, _label, dest_mac, is_local = self.scanned_hosts[index - 1]
+        # item data holds the scanned_hosts index; -1 means a non-selectable group header
+        host_idx = self.scan_dropdown.itemData(index)
+        if host_idx is None or not isinstance(host_idx, int) or host_idx < 0 \
+                or host_idx >= len(self.scanned_hosts):
+            # Group header row clicked — ignore (item is non-selectable so this
+            # normally won't fire, but guard anyway)
+            self.scan_dropdown.setCurrentIndex(0)
+            return
+
+        dest_ip, remote_os, _label, dest_mac, is_local = self.scanned_hosts[host_idx]
         if is_local:
             self.scan_status_label.setText("This entry is the current machine. Choose another destination.")
             self._update_scan_button_label()
