@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QFileDialog, QLabel, QLineEdit, QComboBox, QProgressBar, QStyle, QSizePolicy,
     QCheckBox, QGroupBox, QRadioButton, QButtonGroup, QFrame, QScrollArea,
-    QInputDialog
+    QInputDialog, QSplitter, QPlainTextEdit
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
@@ -520,21 +520,26 @@ class LocalNetworkSync:
             except FileNotFoundError:
                 sftp.mkdir(path)
 
-    def _sftp_put_recursive(self, sftp, local: Path, remote: str):
+    def _sftp_put_recursive(self, sftp, local: Path, remote: str, on_line=None):
         """Upload local file or directory tree to remote path via SFTP."""
         self._sftp_mkdir_p(sftp, remote)
         if local.is_file():
-            sftp.put(str(local), f"{remote}/{local.name}")
+            dest = f"{remote}/{local.name}"
+            if on_line:
+                on_line(f"  sending {local.name}")
+            sftp.put(str(local), dest)
         else:
             for item in local.iterdir():
                 r_sub = f"{remote}/{item.name}"
                 if item.is_dir():
                     self._sftp_mkdir_p(sftp, r_sub)
-                    self._sftp_put_recursive(sftp, item, r_sub)
+                    self._sftp_put_recursive(sftp, item, r_sub, on_line=on_line)
                 else:
+                    if on_line:
+                        on_line(f"  sending {item.name}")
                     sftp.put(str(item), r_sub)
 
-    def _sftp_get_recursive(self, sftp, remote: str, local: Path):
+    def _sftp_get_recursive(self, sftp, remote: str, local: Path, on_line=None):
         """Download remote directory tree to local path via SFTP."""
         local.mkdir(parents=True, exist_ok=True)
         for entry in sftp.listdir_attr(remote):
@@ -542,8 +547,10 @@ class LocalNetworkSync:
             l_path = local / entry.filename
             import stat
             if stat.S_ISDIR(entry.st_mode):
-                self._sftp_get_recursive(sftp, r_path, l_path)
+                self._sftp_get_recursive(sftp, r_path, l_path, on_line=on_line)
             else:
+                if on_line:
+                    on_line(f"  receiving {entry.filename}")
                 sftp.get(r_path, str(l_path))
 
     # ── public transfer methods ────────────────────────────────────────────────
@@ -621,27 +628,31 @@ class LocalNetworkSync:
             raise RuntimeError("Could not determine remote home directory (echo $HOME returned empty).")
         return home + path[1:]  # replace the leading ~ with actual home
 
-    def push_path(self, local_path: str | Path, remote_path: str):
+    def push_path(self, local_path: str | Path, remote_path: str,
+                  on_line=None):
         """Push local_path to absolute remote_path on the remote machine."""
+        def _log(msg):
+            print(msg)
+            if on_line:
+                on_line(msg)
+
         lp = Path(local_path).expanduser()
-        print(f"[push_path] local={lp!r}  remote={remote_path!r}")
+        _log(f"[push] local={lp}  remote={remote_path}")
         if not lp.exists():
             raise FileNotFoundError(
                 f"Local source path does not exist: {lp}\n"
                 f"Check the Source Path field in the UI."
             )
         has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
-        print(f"[push_path] has_rsync={has_rsync}  use_sftp={bool(self.ssh_password or not has_rsync)}")
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
             client, sftp = self._sftp_client()
             try:
                 remote_path = self._expand_remote_path(client, remote_path)
-                print(f"[push_path] SFTP mkdir_p {remote_path!r}")
+                _log(f"[push] SFTP → {remote_path}")
                 self._sftp_mkdir_p(sftp, remote_path)
-                print(f"[push_path] SFTP put_recursive {lp!r} -> {remote_path!r}")
-                self._sftp_put_recursive(sftp, lp, remote_path)
+                self._sftp_put_recursive(sftp, lp, remote_path, on_line=on_line)
             finally:
                 sftp.close()
                 client.close()
@@ -650,26 +661,35 @@ class LocalNetworkSync:
         src_arg  = str(lp) + ("/" if lp.is_dir() else "")
         dest_arg = f"{self.username}@{self.ip}:{remote_path}"
         cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, dest_arg]
-        print(f"[push_path] rsync cmd: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        print(f"[push_path] rsync exit={result.returncode}  stderr={result.stderr.strip()!r}")
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"rsync push failed (exit {result.returncode})")
+        _log("[push] " + " ".join(cmd))
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, stdin=subprocess.DEVNULL)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"rsync push failed (exit {proc.returncode})")
 
-    def pull_path(self, remote_path: str, local_path: str | Path):
+    def pull_path(self, remote_path: str, local_path: str | Path,
+                  on_line=None):
         """Pull from absolute remote_path on the remote machine to local_path."""
+        def _log(msg):
+            print(msg)
+            if on_line:
+                on_line(msg)
+
         lp = Path(local_path).expanduser()
-        print(f"[pull_path] remote={remote_path!r}  local={lp!r}")
+        _log(f"[pull] remote={remote_path}  local={lp}")
         has_rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
-        print(f"[pull_path] has_rsync={has_rsync}  use_sftp={bool(self.ssh_password or not has_rsync)}")
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
             client, sftp = self._sftp_client()
             try:
                 remote_path = self._expand_remote_path(client, remote_path)
-                print(f"[pull_path] expanded remote={remote_path!r}")
-                # Verify remote path exists before attempting download
+                _log(f"[pull] SFTP ← {remote_path}")
                 try:
                     sftp.stat(remote_path)
                 except FileNotFoundError:
@@ -677,8 +697,7 @@ class LocalNetworkSync:
                         f"Remote path does not exist: {remote_path}\n"
                         f"Check the Destination Path field or ensure the remote directory exists."
                     )
-                print(f"[pull_path] SFTP get_recursive {remote_path!r} -> {lp!r}")
-                self._sftp_get_recursive(sftp, remote_path, lp)
+                self._sftp_get_recursive(sftp, remote_path, lp, on_line=on_line)
             finally:
                 sftp.close()
                 client.close()
@@ -687,11 +706,16 @@ class LocalNetworkSync:
         ssh_cmd  = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
         src_arg  = f"{self.username}@{self.ip}:{remote_path}/"
         cmd = ["rsync", "-avz", "--update", "-e", ssh_cmd, src_arg, str(lp)]
-        print(f"[pull_path] rsync cmd: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        print(f"[pull_path] rsync exit={result.returncode}  stderr={result.stderr.strip()!r}")
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"rsync pull failed (exit {result.returncode})")
+        _log("[pull] " + " ".join(cmd))
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, stdin=subprocess.DEVNULL)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                _log(line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"rsync pull failed (exit {proc.returncode})")
 
 
 # ── Background thread for direct machine-to-machine sync ─────────────────────
@@ -712,18 +736,19 @@ class DirectSyncWorkerThread(QThread):
     def run(self):
         try:
             verb = "Pushing to" if self.operation == "push" else "Pulling from"
-            self.progress.emit(f"{verb} remote machine…")
-            print(f"[DirectSyncWorkerThread] op={self.operation!r}  local={self.local_path!r}  remote={self.remote_path!r}")
+            self.progress.emit(f"── {verb} remote machine ──")
             if self.operation == "push":
-                self.sync_obj.push_path(self.local_path, self.remote_path)
+                self.sync_obj.push_path(self.local_path, self.remote_path,
+                                        on_line=self.progress.emit)
                 self.finished.emit(True, "Push complete.")
             else:
-                self.sync_obj.pull_path(self.remote_path, self.local_path)
+                self.sync_obj.pull_path(self.remote_path, self.local_path,
+                                        on_line=self.progress.emit)
                 self.finished.emit(True, "Pull complete.")
         except Exception as exc:
             import traceback
-            print(f"[DirectSyncWorkerThread] ERROR: {exc}")
             traceback.print_exc()
+            self.progress.emit(f"ERROR: {exc}")
             self.finished.emit(False, str(exc))
 
 
@@ -1403,7 +1428,36 @@ class SyncApp(QMainWindow):
             "QScrollArea { background-color: #353535; border: none; }"
             "QWidget { background-color: transparent; }"
         )
-        outer_layout.addWidget(scroll_area)
+
+        # ── Sync Log (bottom panel, always visible) ───────────────────────────
+        log_container = QWidget()
+        log_container.setStyleSheet("background-color: #2a2a2a;")
+        log_vbox = QVBoxLayout(log_container)
+        log_vbox.setContentsMargins(4, 2, 4, 4)
+        log_vbox.setSpacing(2)
+        log_title = QLabel("Sync Log")
+        log_title.setStyleSheet("font-size: 10px; color: #aaa; background-color: #2a2a2a;")
+        log_vbox.addWidget(log_title)
+        self.sync_log = QPlainTextEdit()
+        self.sync_log.setReadOnly(True)
+        self.sync_log.setMaximumBlockCount(1000)
+        self.sync_log.setStyleSheet(
+            "QPlainTextEdit { background-color: #1e1e1e; color: #d4d4d4;"
+            " font-family: monospace; font-size: 11px; border: 1px solid #444; }"
+        )
+        # ~5 lines tall as default (line height ≈ 18px + padding)
+        self.sync_log.setMinimumHeight(108)
+        log_vbox.addWidget(self.sync_log)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setStyleSheet("QSplitter::handle { background-color: #555; height: 4px; }")
+        splitter.addWidget(scroll_area)
+        splitter.addWidget(log_container)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([9999, 108])
+
+        outer_layout.addWidget(splitter)
         self.setCentralWidget(outer_widget)
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
@@ -1624,8 +1678,16 @@ class SyncApp(QMainWindow):
         self._direct_worker.finished.connect(self._on_direct_sync_finished)
         self._direct_worker.start()
 
+    def _log_append(self, msg: str):
+        """Append a line to the sync log panel."""
+        self.sync_log.appendPlainText(msg)
+        # auto-scroll to bottom
+        sb = self.sync_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
     def _on_direct_sync_progress(self, msg: str):
-        self.direct_sync_status_label.setText(msg)
+        self.direct_sync_status_label.setText(msg[:120])
+        self._log_append(msg)
 
     def _on_direct_sync_finished(self, ok: bool, msg: str):
         self.sync_button.setEnabled(True)
@@ -1636,6 +1698,7 @@ class SyncApp(QMainWindow):
         color = "#7ed6a9" if ok else "red"
         self.direct_sync_status_label.setText(("✓ " if ok else "✗ ") + msg)
         self.direct_sync_status_label.setStyleSheet(f"font-size: 10px; color: {color};")
+        self._log_append(("✓ " if ok else "✗ ") + msg)
 
     def pull_from_dest(self):
         self._start_direct_sync("pull")
@@ -1805,6 +1868,7 @@ class SyncApp(QMainWindow):
 
         self.cloud_worker = CloudWorkerThread(operation, sync_obj, local_path, cloud_folder)
         self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
+        self.cloud_worker.progress.connect(self._log_append)
         self.cloud_worker.finished.connect(
             lambda ok, msg: self._on_cloud_op_finished(ok, msg, cloud_syncs[1:], operation, local_path, cloud_folder)
         )
@@ -1813,6 +1877,7 @@ class SyncApp(QMainWindow):
     def _on_cloud_op_finished(self, ok: bool, msg: str, remaining: list,
                                operation: str, local_path: str, cloud_folder: str):
         if not ok:
+            self._log_append(f"ERROR: {msg}")
             self.cloud_op_status_label.setText(f"Error: {msg[:80]}")
             self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: red;")
             self._reset_cloud_buttons()
@@ -1824,11 +1889,13 @@ class SyncApp(QMainWindow):
             self.cloud_op_status_label.setText(f"{operation.title()}ing via {name}…")
             self.cloud_worker = CloudWorkerThread(operation, sync_obj, local_path, cloud_folder)
             self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
+            self.cloud_worker.progress.connect(self._log_append)
             self.cloud_worker.finished.connect(
                 lambda ok2, msg2: self._on_cloud_op_finished(ok2, msg2, remaining[1:], operation, local_path, cloud_folder)
             )
             self.cloud_worker.start()
         else:
+            self._log_append(f"✓ {msg}")
             self.cloud_op_status_label.setText(f"✓ {msg}")
             self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
             self._reset_cloud_buttons()
