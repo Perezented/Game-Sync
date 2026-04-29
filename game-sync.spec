@@ -5,7 +5,7 @@ a = Analysis(
     ['game-sync.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('app_icon.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
