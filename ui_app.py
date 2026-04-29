@@ -30,7 +30,10 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -59,6 +62,220 @@ from local_network_sync import (
     LocalNetworkSync,
 )
 from network_scanner import NetworkScanner
+
+
+# ── Emulator / custom game templates ─────────────────────────────────────────
+
+_EMULATOR_TEMPLATES: list[dict] = [
+    {
+        "label": "Custom (enter paths manually)",
+        "windows": "",
+        "linux": "",
+    },
+    # ── RetroArch ──────────────────────────────────────────────────────────
+    {
+        "label": "RetroArch (any system)",
+        "windows": r"%APPDATA%\RetroArch\saves",
+        "linux": "~/.config/retroarch/saves",
+    },
+    {
+        "label": "RetroArch – EmuDeck layout",
+        "windows": r"%APPDATA%\RetroArch\saves",
+        "linux": "~/Emulation/saves/retroarch/saves",
+    },
+    # ── Standalone emulators ───────────────────────────────────────────────
+    {
+        "label": "Dolphin (GameCube / Wii)",
+        "windows": r"%USERPROFILE%\Documents\Dolphin Emulator\GC",
+        "linux": "~/.local/share/dolphin-emu/GC",
+    },
+    {
+        "label": "Dolphin – EmuDeck layout",
+        "windows": r"%USERPROFILE%\Documents\Dolphin Emulator\GC",
+        "linux": "~/Emulation/saves/dolphin-emu/GC",
+    },
+    {
+        "label": "DuckStation (PS1)",
+        "windows": r"%APPDATA%\DuckStation\memcards",
+        "linux": "~/.local/share/duckstation/memcards",
+    },
+    {
+        "label": "DuckStation – EmuDeck layout",
+        "windows": r"%APPDATA%\DuckStation\memcards",
+        "linux": "~/Emulation/saves/duckstation/memcards",
+    },
+    {
+        "label": "PCSX2 (PS2)",
+        "windows": r"%USERPROFILE%\Documents\PCSX2\memcards",
+        "linux": "~/.config/PCSX2/memcards",
+    },
+    {
+        "label": "PCSX2 – EmuDeck layout",
+        "windows": r"%USERPROFILE%\Documents\PCSX2\memcards",
+        "linux": "~/Emulation/saves/PCSX2/memcards",
+    },
+    {
+        "label": "RPCS3 (PS3)",
+        "windows": r"%APPDATA%\rpcs3\dev_hdd0\home\00000001\savedata",
+        "linux": "~/.config/rpcs3/dev_hdd0/home/00000001/savedata",
+    },
+    {
+        "label": "RPCS3 – EmuDeck layout",
+        "windows": r"%APPDATA%\rpcs3\dev_hdd0\home\00000001\savedata",
+        "linux": "~/Emulation/saves/rpcs3/dev_hdd0/home/00000001/savedata",
+    },
+    {
+        "label": "Yuzu / Ryujinx (Nintendo Switch)",
+        "windows": r"%APPDATA%\yuzu\nand\user\save",
+        "linux": "~/.local/share/yuzu/nand/user/save",
+    },
+    {
+        "label": "Yuzu – EmuDeck layout",
+        "windows": r"%APPDATA%\yuzu\nand\user\save",
+        "linux": "~/Emulation/saves/yuzu/nand/user/save",
+    },
+    {
+        "label": "Citra (Nintendo 3DS)",
+        "windows": r"%APPDATA%\Citra\sdmc\Nintendo 3DS",
+        "linux": "~/.local/share/citra-emu/sdmc/Nintendo 3DS",
+    },
+    {
+        "label": "PPSSPP (PSP)",
+        "windows": r"%APPDATA%\PPSSPP\PSP\SAVEDATA",
+        "linux": "~/.config/ppsspp/PSP/SAVEDATA",
+    },
+    {
+        "label": "mGBA (GBA)",
+        "windows": r"%APPDATA%\mGBA\saves",
+        "linux": "~/.config/mgba/saves",
+    },
+    {
+        "label": "EmuDeck – generic saves folder",
+        "windows": "",
+        "linux": "~/Emulation/saves",
+    },
+]
+
+
+class _CustomGameDialog(QDialog):
+    """Dialog to add a custom / emulator game entry."""
+
+    def __init__(self, parent=None, existing: dict | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Custom Game" if not existing else "Edit Custom Game")
+        self.setMinimumWidth(560)
+        self.setStyleSheet(
+            "QDialog, QWidget { background-color: #353535; color: white; }"
+            "QLineEdit, QComboBox { background-color: #3f3f3f; color: white;"
+            "  border: 1px solid #555; padding: 2px 4px; }"
+            "QPushButton { background-color: #444; color: white; border: 1px solid #555;"
+            "  padding: 3px 8px; }"
+            "QPushButton:hover { background-color: #5a5a5a; }"
+            "QLabel { color: white; }"
+            "QDialogButtonBox QPushButton { min-width: 70px; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+
+        # ── Game name ──────────────────────────────────────────────────────
+        self.name_edit = QLineEdit(existing.get("name", "") if existing else "")
+        self.name_edit.setPlaceholderText("e.g. My Retro Game")
+        form.addRow("Game name:", self.name_edit)
+
+        # ── Template helper ────────────────────────────────────────────────
+        self.template_combo = QComboBox()
+        for t in _EMULATOR_TEMPLATES:
+            self.template_combo.addItem(t["label"])
+        self.template_combo.currentIndexChanged.connect(self._apply_template)
+        form.addRow("Emulator / template:", self.template_combo)
+
+        layout.addLayout(form)
+
+        # ── Windows path ───────────────────────────────────────────────────
+        win_label = QLabel("Windows save path:")
+        layout.addWidget(win_label)
+        win_row = QHBoxLayout()
+        self.windows_edit = QLineEdit(existing.get("windows", "") if existing else "")
+        self.windows_edit.setPlaceholderText(
+            r"e.g. %USERPROFILE%\Documents\MyGame\Saves"
+        )
+        win_row.addWidget(self.windows_edit)
+        win_browse = QPushButton("Browse…")
+        win_browse.setFixedWidth(80)
+        win_browse.clicked.connect(lambda: self._browse(self.windows_edit))
+        win_row.addWidget(win_browse)
+        layout.addLayout(win_row)
+
+        # ── Linux / SteamDeck path ─────────────────────────────────────────
+        lin_label = QLabel("Linux / SteamDeck save path:")
+        layout.addWidget(lin_label)
+        lin_row = QHBoxLayout()
+        self.linux_edit = QLineEdit(existing.get("linux", "") if existing else "")
+        self.linux_edit.setPlaceholderText("e.g. ~/MyGame/saves")
+        lin_row.addWidget(self.linux_edit)
+        lin_browse = QPushButton("Browse…")
+        lin_browse.setFixedWidth(80)
+        lin_browse.clicked.connect(lambda: self._browse(self.linux_edit))
+        lin_row.addWidget(lin_browse)
+        layout.addLayout(lin_row)
+
+        hint = QLabel(
+            "💡  Pick a template above to auto-fill common emulator paths, then "
+            "refine them as needed.  Leave a path blank if that OS is not used."
+        )
+        hint.setStyleSheet("font-size: 10px; color: #aaa;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # ── Buttons ────────────────────────────────────────────────────────
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _apply_template(self, idx: int):
+        t = _EMULATOR_TEMPLATES[idx]
+        if t["windows"]:
+            self.windows_edit.setText(t["windows"])
+        if t["linux"]:
+            self.linux_edit.setText(t["linux"])
+
+    def _browse(self, target: QLineEdit):
+        start = str(Path.home())
+        txt = target.text().strip()
+        if txt:
+            try:
+                p = Path(
+                    txt.replace("%USERPROFILE%", str(Path.home()))
+                    .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+                ).expanduser()
+                candidate = p if p.is_dir() else p.parent
+                if candidate.exists():
+                    start = str(candidate)
+            except Exception:
+                pass
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", start)
+        if folder:
+            target.setText(folder)
+
+    def _validate_and_accept(self):
+        if not self.name_edit.text().strip():
+            QMessageBox.warning(self, "Missing name", "Please enter a game name.")
+            return
+        self.accept()
+
+    def result_data(self) -> dict:
+        return {
+            "name": self.name_edit.text().strip(),
+            "windows": self.windows_edit.text().strip(),
+            "linux": self.linux_edit.text().strip(),
+        }
 
 
 class SyncApp(QMainWindow):
@@ -413,8 +630,20 @@ class SyncApp(QMainWindow):
         self.select_game_label = QLabel("Select Game:")
         content_layout.addWidget(self.select_game_label)
 
+        game_row = QHBoxLayout()
         self.game_dropdown = QComboBox()
-        content_layout.addWidget(self.game_dropdown)
+        game_row.addWidget(self.game_dropdown, 1)
+        self._add_game_btn = QPushButton("➕")
+        self._add_game_btn.setFixedWidth(32)
+        self._add_game_btn.setToolTip("Add a custom / emulator game")
+        self._add_game_btn.clicked.connect(self._add_custom_game)
+        game_row.addWidget(self._add_game_btn)
+        self._remove_game_btn = QPushButton("🗑")
+        self._remove_game_btn.setFixedWidth(32)
+        self._remove_game_btn.setToolTip("Remove the selected custom game")
+        self._remove_game_btn.clicked.connect(self._remove_custom_game)
+        game_row.addWidget(self._remove_game_btn)
+        content_layout.addLayout(game_row)
 
         self.source_label = QLabel("Source Path (this machine):")
         content_layout.addWidget(self.source_label)
@@ -1234,6 +1463,75 @@ class SyncApp(QMainWindow):
         if default_path:
             self.dest_path.setText(default_path)
             self.save_settings()
+
+    # ── Custom / emulator game management ────────────────────────────────────
+
+    def _is_custom_game(self, name: str) -> bool:
+        """Return True if the named game was added by the user (not a built-in)."""
+        builtin_names = {g["name"] for g in GAME_DEFAULTS}
+        return name not in builtin_names
+
+    def _add_custom_game(self):
+        dlg = _CustomGameDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dlg.result_data()
+        name = data["name"]
+
+        if name in self.game_defaults:
+            QMessageBox.warning(
+                self, "Duplicate name",
+                f'A game named "{name}" already exists. '
+                "Please use a different name or remove the existing entry first."
+            )
+            return
+
+        # Register in the runtime defaults dict
+        self.game_defaults[name] = {
+            "windows": data["windows"],
+            "linux": data["linux"],
+            "steamdeck": data["linux"],  # use same path for SteamDeck
+        }
+        self.game_dropdown.addItem(name)
+        self.game_dropdown.setCurrentText(name)
+
+        # Persist
+        custom_games = self.previous_paths.get("custom_games", [])
+        custom_games.append(data)
+        self.previous_paths["custom_games"] = custom_games
+        self.save_settings()
+
+    def _remove_custom_game(self):
+        name = self.game_dropdown.currentText()
+        if not name:
+            return
+        if not self._is_custom_game(name):
+            QMessageBox.information(
+                self, "Built-in game",
+                f'"{name}" is a built-in game and cannot be removed.'
+            )
+            return
+        reply = QMessageBox.question(
+            self, "Remove game",
+            f'Remove "{name}" from the game list?\n'
+            "Saved paths for this game will also be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Remove from runtime dict and dropdown
+        self.game_defaults.pop(name, None)
+        idx = self.game_dropdown.findText(name)
+        if idx >= 0:
+            self.game_dropdown.removeItem(idx)
+
+        # Remove from persistent custom_games list
+        custom_games = self.previous_paths.get("custom_games", [])
+        custom_games = [g for g in custom_games if g.get("name") != name]
+        self.previous_paths["custom_games"] = custom_games
+        self.save_settings()
 
     def _browse_folder(self, target_input: QLineEdit):
         """Open a cross-platform folder picker and write the selection to a line edit."""
@@ -2376,6 +2674,19 @@ class SyncApp(QMainWindow):
             self.game_defaults[game["name"]] = game["defaults"]
         self.game_dropdown.addItems(self.game_defaults.keys())
 
+    def _load_custom_games_from_settings(self):
+        """Append any user-saved custom games to the game list (called after load_settings)."""
+        for entry in self.previous_paths.get("custom_games", []):
+            name = entry.get("name", "").strip()
+            if not name or name in self.game_defaults:
+                continue  # skip duplicates / malformed
+            self.game_defaults[name] = {
+                "windows": entry.get("windows", ""),
+                "linux": entry.get("linux", ""),
+                "steamdeck": entry.get("linux", ""),
+            }
+            self.game_dropdown.addItem(name)
+
     def load_settings(self):
         if not self.settings_file.exists():
             return
@@ -2467,6 +2778,9 @@ class SyncApp(QMainWindow):
 
         if not self.dest_path.text():
             self.update_paths()
+
+        # Load any custom games that were persisted in previous sessions
+        self._load_custom_games_from_settings()
 
         if hasattr(self, "settings_json_editor"):
             self._st_reload_json()
