@@ -1,0 +1,229 @@
+import subprocess
+import shutil
+from pathlib import Path
+
+from PyQt6.QtCore import QThread, pyqtSignal
+
+# ── rclone handles GDrive + Dropbox without developer accounts ───────────────
+# Install from https://rclone.org/install/
+RCLONE_AVAILABLE = bool(shutil.which("rclone"))
+
+
+class RcloneSync:
+    """Cloud sync for Google Drive and Dropbox via rclone.
+
+    No developer accounts needed — rclone uses its own bundled OAuth credentials.
+    Users authorize once via their browser (Google/Dropbox account login).
+    Install rclone from: https://rclone.org/install/
+    """
+
+    PROVIDER_TYPE = {"gdrive": "drive", "dropbox": "dropbox"}
+
+    def __init__(self, provider: str, token_json: str = ""):
+        self.provider = provider  # "gdrive" or "dropbox"
+        self.token_json = token_json  # JSON string of the rclone token
+
+    def is_authenticated(self) -> bool:
+        return bool(self.token_json)
+
+    def _config_path(self) -> Path:
+        cfg_dir = Path.home() / ".config" / "game-sync-tool"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        return cfg_dir / f"rclone_{self.provider}.conf"
+
+    def _write_config(self) -> Path:
+        cfg = self._config_path()
+        rtype = self.PROVIDER_TYPE.get(self.provider, self.provider)
+        cfg.write_text(
+            f"[{self.provider}]\ntype = {rtype}\ntoken = {self.token_json}\n",
+            encoding="utf-8",
+        )
+        return cfg
+
+    def _run(self, cmd, on_line=None, on_proc=None, cancelled=None):
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        if on_proc:
+            on_proc(proc)
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line and on_line:
+                on_line(line)
+            if cancelled and cancelled():
+                proc.kill()
+                return
+        proc.wait()
+        if proc.returncode != 0 and not (cancelled and cancelled()):
+            raise RuntimeError(f"rclone exited with code {proc.returncode}")
+
+    def upload(
+        self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None
+    ):
+        cfg = self._write_config()
+        local_path = str(
+            Path(
+                str(local_path)
+                .replace("%USERPROFILE%", str(Path.home()))
+                .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+            )
+            .expanduser()
+            .resolve()
+        )
+        remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+        if on_line:
+            on_line(f"[rclone upload] {local_path!r}  →  {remote!r}")
+        self._run(
+            [
+                "rclone",
+                "copy",
+                "--config",
+                str(cfg),
+                str(local_path),
+                remote,
+                "-v",
+                "--stats-one-line-date",
+            ],
+            on_line,
+            on_proc,
+            cancelled,
+        )
+
+    def download(
+        self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None
+    ):
+        cfg = self._write_config()
+        local_path = str(
+            Path(
+                str(local_path)
+                .replace("%USERPROFILE%", str(Path.home()))
+                .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+            )
+            .expanduser()
+            .resolve()
+        )
+        remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        if on_line:
+            on_line(f"[rclone download] {remote!r}  →  {local_path!r}")
+        self._run(
+            [
+                "rclone",
+                "copy",
+                "--config",
+                str(cfg),
+                remote,
+                str(local_path),
+                "-v",
+                "--stats-one-line-date",
+            ],
+            on_line,
+            on_proc,
+            cancelled,
+        )
+
+
+# ── Background thread for cloud operations ────────────────────────────────────
+
+
+class CloudWorkerThread(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+
+    def __init__(self, operation: str, sync_obj, local_path: str, cloud_folder: str):
+        super().__init__()
+        self.operation = operation  # "upload" or "download"
+        self.sync_obj = sync_obj
+        self.local_path = local_path
+        self.cloud_folder = cloud_folder
+        self._cancelled = False
+        self._proc = None  # subprocess.Popen reference for LocalNetworkSync rsync
+
+    def cancel(self):
+        self._cancelled = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _store_proc(self, proc):
+        self._proc = proc
+
+    def run(self):
+        if self._cancelled:
+            self.finished.emit(False, "Cancelled.")
+            return
+        try:
+            # ── LocalNetworkSync: use push_path / pull_path for streaming output,
+            #    cancel support and rsync --update semantics (same as Direct Sync).
+            if hasattr(self.sync_obj, "push_path"):
+                lns = self.sync_obj
+                # Remote path = remote_base / cloud_folder  (mirrors upload() logic)
+                remote_path = (
+                    f"{lns.remote_base.rstrip('/')}/{self.cloud_folder.lstrip('/')}"
+                )
+                if self.operation == "upload":
+                    self.progress.emit(f"── Pushing to {lns.ip}:{remote_path} ──")
+                    lns.push_path(
+                        self.local_path,
+                        remote_path,
+                        on_line=self.progress.emit,
+                        on_proc=self._store_proc,
+                        cancelled=lambda: self._cancelled,
+                    )
+                    if self._cancelled:
+                        self.finished.emit(False, "Cancelled.")
+                    else:
+                        self.finished.emit(True, "Upload complete.")
+                else:
+                    self.progress.emit(f"── Pulling from {lns.ip}:{remote_path} ──")
+                    lns.pull_path(
+                        remote_path,
+                        self.local_path,
+                        on_line=self.progress.emit,
+                        on_proc=self._store_proc,
+                        cancelled=lambda: self._cancelled,
+                    )
+                    if self._cancelled:
+                        self.finished.emit(False, "Cancelled.")
+                    else:
+                        self.finished.emit(True, "Download complete.")
+                return
+
+            # ── RcloneSync (GDrive/Dropbox): streaming output + cancel support ──
+            self.progress.emit(f"{self.operation.title()}ing via cloud…")
+            if self.operation == "upload":
+                self.sync_obj.upload(
+                    self.local_path,
+                    self.cloud_folder,
+                    on_line=self.progress.emit,
+                    on_proc=self._store_proc,
+                    cancelled=lambda: self._cancelled,
+                )
+                if self._cancelled:
+                    self.finished.emit(False, "Cancelled.")
+                else:
+                    self.finished.emit(True, "Upload complete.")
+            else:
+                self.sync_obj.download(
+                    self.cloud_folder,
+                    self.local_path,
+                    on_line=self.progress.emit,
+                    on_proc=self._store_proc,
+                    cancelled=lambda: self._cancelled,
+                )
+                if self._cancelled:
+                    self.finished.emit(False, "Cancelled.")
+                else:
+                    self.finished.emit(True, "Download complete.")
+        except Exception as exc:
+            import traceback
+
+            traceback.print_exc()
+            self.finished.emit(False, "Cancelled." if self._cancelled else str(exc))
