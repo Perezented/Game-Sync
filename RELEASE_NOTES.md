@@ -291,8 +291,9 @@ Cloud sync requires a free tool called **rclone**. Install it once and Game Sync
 #### Windows
 
 1. Go to [rclone.org/downloads](https://rclone.org/downloads/) and download the **Windows 64-bit** zip
-2. Open the zip and copy `rclone.exe` into `C:\Windows\System32\`
-3. That's it — no setup wizard needed
+2. Open the zip and copy `rclone.exe` into a user-writable folder such as `%LOCALAPPDATA%\Programs\rclone\`
+3. Add that folder to your **user PATH** so Game Sync can find `rclone`
+4. If you prefer to place it in `C:\Windows\System32\`, note that this usually requires administrator rights
 
 #### Linux — Ubuntu / Debian / Mint / Pop!_OS
 
