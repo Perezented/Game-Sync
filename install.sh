@@ -331,13 +331,13 @@ goto_post_install() {
     # ── PATH check ─────────────────────────────────────────────────────────────
     local install_dir
     install_dir="$(dirname "$install_path")"
-    if ! echo "$PATH" | grep -q "$install_dir"; then
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
         warn "$install_dir is not currently in your PATH."
         ask "Add it to ~/.bashrc automatically?"
         read_prompt "Choice [Y/n, default Y]: " add_path
         add_path="${add_path:-Y}"
         if [[ "${add_path,,}" == "y" ]]; then
-            if ! grep -q "$install_dir" "$HOME/.bashrc" 2>/dev/null; then
+            if ! grep -qF -- "export PATH=\"${install_dir}:\$PATH\"" "$HOME/.bashrc" 2>/dev/null; then
                 echo "export PATH=\"${install_dir}:\$PATH\"" >> "$HOME/.bashrc"
                 success "Added $install_dir to PATH in ~/.bashrc"
                 info "Run 'source ~/.bashrc' or open a new terminal to apply."
