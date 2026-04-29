@@ -125,13 +125,16 @@ download_file() {
 # ── .desktop file creation ────────────────────────────────────────────────────
 create_desktop_entry() {
     local exec_path="$1"
+    local escaped_exec_path
+    escaped_exec_path=${exec_path//\\/\\\\}
+    escaped_exec_path=${escaped_exec_path//\"/\\\"}
     mkdir -p "$(dirname "$DESKTOP_FILE")"
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Type=Application
 Name=Game Sync
 Comment=Sync game saves across machines and cloud
-Exec=${exec_path}
+Exec="${escaped_exec_path}"
 Icon=utilities-terminal
 Terminal=false
 Categories=Utility;Game;
