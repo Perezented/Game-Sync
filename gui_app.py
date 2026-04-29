@@ -1139,20 +1139,21 @@ class SyncApp(QMainWindow):
         window_control_layout = QHBoxLayout()
         window_control_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        minimize_button = QPushButton("_", self)
-        minimize_button.setFixedSize(30, 20)
-        minimize_button.clicked.connect(self.showMinimized)
-        window_control_layout.addWidget(minimize_button)
+        if platform.system() != "Windows":
+            minimize_button = QPushButton("_", self)
+            minimize_button.setFixedSize(30, 20)
+            minimize_button.clicked.connect(self.showMinimized)
+            window_control_layout.addWidget(minimize_button)
 
-        maximize_button = QPushButton("[ ]", self)
-        maximize_button.setFixedSize(30, 20)
-        maximize_button.clicked.connect(self.toggle_maximize)
-        window_control_layout.addWidget(maximize_button)
+            maximize_button = QPushButton("[ ]", self)
+            maximize_button.setFixedSize(30, 20)
+            maximize_button.clicked.connect(self.toggle_maximize)
+            window_control_layout.addWidget(maximize_button)
 
-        close_button = QPushButton("X", self)
-        close_button.setFixedSize(30, 20)
-        close_button.clicked.connect(self.close)
-        window_control_layout.addWidget(close_button)
+            close_button = QPushButton("X", self)
+            close_button.setFixedSize(30, 20)
+            close_button.clicked.connect(self.close)
+            window_control_layout.addWidget(close_button)
 
         header_layout.addLayout(window_control_layout)
         outer_layout.addWidget(header_widget)
