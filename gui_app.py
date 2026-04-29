@@ -220,7 +220,9 @@ class RcloneSync:
                 str(local_path)
                 .replace("%USERPROFILE%", str(Path.home()))
                 .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
-            ).expanduser().resolve()
+            )
+            .expanduser()
+            .resolve()
         )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         if on_line:
@@ -250,7 +252,9 @@ class RcloneSync:
                 str(local_path)
                 .replace("%USERPROFILE%", str(Path.home()))
                 .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
-            ).expanduser().resolve()
+            )
+            .expanduser()
+            .resolve()
         )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         Path(local_path).mkdir(parents=True, exist_ok=True)
@@ -740,11 +744,15 @@ class LocalNetworkSync:
             if on_line:
                 on_line(msg)
 
-        lp = Path(
-            str(local_path)
-            .replace("%USERPROFILE%", str(Path.home()))
-            .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
-        ).expanduser().resolve()
+        lp = (
+            Path(
+                str(local_path)
+                .replace("%USERPROFILE%", str(Path.home()))
+                .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+            )
+            .expanduser()
+            .resolve()
+        )
         _log(f"[push] local={lp}  remote={remote_path}")
         if not lp.exists():
             raise FileNotFoundError(
@@ -808,11 +816,15 @@ class LocalNetworkSync:
             if on_line:
                 on_line(msg)
 
-        lp = Path(
-            local_path
-            .replace("%USERPROFILE%", str(Path.home()))
-            .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
-        ).expanduser().resolve()
+        lp = (
+            Path(
+                local_path.replace("%USERPROFILE%", str(Path.home())).replace(
+                    "%APPDATA%", str(Path.home() / "AppData" / "Roaming")
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
         _log(f"[pull] remote={remote_path}  local={lp}")
         has_rsync = shutil.which("rsync") is not None
         if self.ssh_password or not has_rsync:
@@ -1096,9 +1108,16 @@ class SyncApp(QMainWindow):
                         current_mac = mac_part.replace("-", ":").lower()
                     elif "IPv4 Address" in ls:
                         # e.g. "IPv4 Address. . . . . . . . . . . : 192.168.1.5(Preferred)"
-                        ip_part = ls.split(":", 1)[-1].strip().replace("(Preferred)", "").strip()
+                        ip_part = (
+                            ls.split(":", 1)[-1]
+                            .strip()
+                            .replace("(Preferred)", "")
+                            .strip()
+                        )
                         if ip_part and ip_part not in local_ips:
-                            interfaces.append({"iface": "local", "ip": ip_part, "mac": current_mac})
+                            interfaces.append(
+                                {"iface": "local", "ip": ip_part, "mac": current_mac}
+                            )
                             local_ips.add(ip_part)
                             if current_mac:
                                 local_macs.add(current_mac)
@@ -1679,7 +1698,9 @@ class SyncApp(QMainWindow):
 
         content_layout.addSpacing(10)
         # add line spacer between
-        content_layout.addWidget(QFrame(frameShape=QFrame.Shape.HLine, styleSheet="color: #555;"), 1)
+        content_layout.addWidget(
+            QFrame(frameShape=QFrame.Shape.HLine, styleSheet="color: #555;"), 1
+        )
         content_layout.addSpacing(10)
 
         # ── Sync Button ───────────────────────────────────────────────────────
@@ -1736,7 +1757,9 @@ class SyncApp(QMainWindow):
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         )
 
-        content_layout.addWidget(self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        content_layout.addWidget(
+            self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter
+        )
         self.warning_label.setVisible(False)  # only show when sync starts
 
         # ── Progress Bar ──────────────────────────────────────────────────────
@@ -1797,7 +1820,9 @@ class SyncApp(QMainWindow):
         # Inner scrollable widget so the panel never clips on small windows
         settings_scroll = QScrollArea()
         settings_scroll.setWidgetResizable(True)
-        settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         settings_scroll.setStyleSheet(
             "QScrollArea { background: #2a2a2a; border: none; }"
             "QWidget { background: transparent; }"
@@ -1845,11 +1870,13 @@ class SyncApp(QMainWindow):
 
         # ── Section: Raw JSON editor ──────────────────────────────────────────
         settings_vbox.addWidget(_section_header("🛠  Advanced: Raw Settings File"))
-        settings_vbox.addWidget(_hint(
-            "Power users: edit the raw JSON that is saved to disk.  "
-            "Be careful — invalid JSON will be rejected.  "
-            "Use 'Reload from disk' to discard any unsaved edits."
-        ))
+        settings_vbox.addWidget(
+            _hint(
+                "Power users: edit the raw JSON that is saved to disk.  "
+                "Be careful — invalid JSON will be rejected.  "
+                "Use 'Reload from disk' to discard any unsaved edits."
+            )
+        )
 
         self.settings_json_editor = QPlainTextEdit()
         self.settings_json_editor.setStyleSheet(
@@ -1893,9 +1920,7 @@ class SyncApp(QMainWindow):
         about_vbox.setSpacing(6)
 
         about_title = QLabel("Game Sync Tool")
-        about_title.setStyleSheet(
-            "font-size: 16px; font-weight: bold; color: white;"
-        )
+        about_title.setStyleSheet("font-size: 16px; font-weight: bold; color: white;")
         about_vbox.addWidget(about_title)
 
         about_desc = QLabel(
@@ -1948,9 +1973,7 @@ class SyncApp(QMainWindow):
         )
         donate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         donate_btn.clicked.connect(
-            lambda: webbrowser.open(
-                "https://www.paypal.com/ncp/payment/J4WYMPBFTLBMU"
-            )
+            lambda: webbrowser.open("https://www.paypal.com/ncp/payment/J4WYMPBFTLBMU")
         )
         about_links_row.addWidget(donate_btn)
         about_links_row.addStretch()
@@ -1972,8 +1995,6 @@ class SyncApp(QMainWindow):
 
         outer_layout.addWidget(splitter)
         self.setCentralWidget(outer_widget)
-
-
 
     # ── Cloud UI callbacks ────────────────────────────────────────────────────
 
@@ -2178,8 +2199,15 @@ class SyncApp(QMainWindow):
 
     def _start_direct_sync(self, operation: str):
         """Common launcher for push/pull between this machine and the destination."""
-        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
-            op_label = "Push to destination" if operation == "push" else "Pull from destination"
+        if (
+            getattr(self, "settings_confirm_sync_cb", None)
+            and self.settings_confirm_sync_cb.isChecked()
+        ):
+            op_label = (
+                "Push to destination"
+                if operation == "push"
+                else "Pull from destination"
+            )
             reply = QMessageBox.question(
                 self,
                 "Confirm Sync",
@@ -2350,6 +2378,7 @@ class SyncApp(QMainWindow):
                 except Exception:
                     pass
                 import time as _time
+
                 _time.sleep(0.5)  # give the OS a moment to release the port
 
                 result = subprocess.run(
@@ -2372,7 +2401,9 @@ class SyncApp(QMainWindow):
                     )
                 else:
                     # Fallback: find any JSON object in the output
-                    m = _re.search(r'(\{[^{}]*"access_token"[^{}]*\})', output, _re.DOTALL)
+                    m = _re.search(
+                        r'(\{[^{}]*"access_token"[^{}]*\})', output, _re.DOTALL
+                    )
                     if m:
                         token_json = m.group(1).strip()
                     else:
@@ -2510,9 +2541,13 @@ class SyncApp(QMainWindow):
         return folder
 
     def push_to_cloud(self):
-        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
+        if (
+            getattr(self, "settings_confirm_sync_cb", None)
+            and self.settings_confirm_sync_cb.isChecked()
+        ):
             reply = QMessageBox.question(
-                self, "Confirm Push",
+                self,
+                "Confirm Push",
                 "Are you sure you want to push saves to the cloud?\nThis will overwrite files in the cloud folder.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -2532,9 +2567,13 @@ class SyncApp(QMainWindow):
         self._run_cloud_op("upload", cloud_syncs, local_path)
 
     def pull_from_cloud(self):
-        if getattr(self, "settings_confirm_sync_cb", None) and self.settings_confirm_sync_cb.isChecked():
+        if (
+            getattr(self, "settings_confirm_sync_cb", None)
+            and self.settings_confirm_sync_cb.isChecked()
+        ):
             reply = QMessageBox.question(
-                self, "Confirm Pull",
+                self,
+                "Confirm Pull",
                 "Are you sure you want to pull saves from the cloud?\nThis will overwrite local files.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
