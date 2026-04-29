@@ -177,6 +177,7 @@ install_rclone_system() {
         return 0
     fi
     info "Installing rclone via official script (requires sudo) …"
+    require curl
     sudo -v && curl -fsSL https://rclone.org/install.sh | sudo bash
     success "rclone installed"
 }
