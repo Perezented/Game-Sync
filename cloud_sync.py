@@ -1,3 +1,5 @@
+import os
+import platform
 import subprocess
 import shutil
 from pathlib import Path
@@ -27,7 +29,10 @@ class RcloneSync:
         return bool(self.token_json)
 
     def _config_path(self) -> Path:
-        cfg_dir = Path.home() / ".config" / "game-sync-tool"
+        if platform.system() == "Windows":
+            cfg_dir = Path(os.getenv("APPDATA", Path.home() / "AppData" / "Roaming")) / "game-sync-tool"
+        else:
+            cfg_dir = Path.home() / ".config" / "game-sync-tool"
         cfg_dir.mkdir(parents=True, exist_ok=True)
         return cfg_dir / f"rclone_{self.provider}.conf"
 
@@ -38,6 +43,11 @@ class RcloneSync:
             f"[{self.provider}]\ntype = {rtype}\ntoken = {self.token_json}\n",
             encoding="utf-8",
         )
+        if platform.system() != "Windows":
+            try:
+                os.chmod(cfg, 0o600)
+            except OSError:
+                pass
         return cfg
 
     def _run(self, cmd, on_line=None, on_proc=None, cancelled=None):
@@ -56,14 +66,25 @@ class RcloneSync:
                 on_line(line)
             if cancelled and cancelled():
                 proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.wait()
                 return
         proc.wait()
         if proc.returncode != 0 and not (cancelled and cancelled()):
             raise RuntimeError(f"rclone exited with code {proc.returncode}")
 
+    def _ensure_rclone_installed(self):
+        if not RCLONE_AVAILABLE:
+            raise RuntimeError(
+                "rclone is not installed. Install it from https://rclone.org/install/."
+            )
+
     def upload(
         self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None
     ):
+        self._ensure_rclone_installed()
         cfg = self._write_config()
         local_path = str(
             Path(
@@ -96,6 +117,7 @@ class RcloneSync:
     def download(
         self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None
     ):
+        self._ensure_rclone_installed()
         cfg = self._write_config()
         local_path = str(
             Path(

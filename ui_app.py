@@ -7,6 +7,13 @@ import subprocess
 import webbrowser
 from pathlib import Path
 
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    keyring = None
+    KEYRING_AVAILABLE = False
+
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import (
@@ -34,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cloud_sync import CloudWorkerThread, RcloneSync
+from cloud_sync import CloudWorkerThread, RCLONE_AVAILABLE, RcloneSync
 from game_defaults import GAME_DEFAULTS
 from local_network_sync import (
     ConnectionTestThread,
@@ -134,11 +141,86 @@ class SyncApp(QMainWindow):
     def get_settings_file_path(self):
         game_sync_settings = "game_sync_settings.json"
         if platform.system() == "Windows":
-            base = Path(os.getenv("APPDATA", "~"))
+            appdata = os.getenv("APPDATA")
+            base = Path(appdata) if appdata else Path.home()
         else:
             base = Path.home()
 
         return base / game_sync_settings
+
+    def _rclone_token_key(self, provider: str) -> str:
+        return f"game-sync.rclone.{provider}"
+
+    def _store_rclone_token(self, provider: str, token: str) -> None:
+        """Prefer the OS credential store for sensitive OAuth refresh tokens."""
+        if KEYRING_AVAILABLE:
+            try:
+                keyring.set_password(
+                    "Game Sync Tool",
+                    self._rclone_token_key(provider),
+                    token,
+                )
+                self.previous_paths[f"rclone_{provider}_token_id"] = (
+                    self._rclone_token_key(provider)
+                )
+                self.previous_paths[f"rclone_{provider}_token"] = ""
+                return
+            except Exception:
+                pass
+
+        self.previous_paths[f"rclone_{provider}_token"] = token
+        self.previous_paths.pop(f"rclone_{provider}_token_id", None)
+
+    def _retrieve_rclone_token(self, provider: str) -> str:
+        if KEYRING_AVAILABLE:
+            token_id = self.previous_paths.get(f"rclone_{provider}_token_id")
+            if token_id:
+                try:
+                    token = keyring.get_password("Game Sync Tool", token_id)
+                    if token:
+                        return token
+                except Exception:
+                    pass
+        return self.previous_paths.get(f"rclone_{provider}_token", "")
+
+    def _delete_rclone_token(self, provider: str) -> None:
+        if KEYRING_AVAILABLE:
+            token_id = self.previous_paths.get(f"rclone_{provider}_token_id")
+            if token_id:
+                try:
+                    keyring.delete_password("Game Sync Tool", token_id)
+                except Exception:
+                    pass
+        self.previous_paths.pop(f"rclone_{provider}_token", None)
+        self.previous_paths.pop(f"rclone_{provider}_token_id", None)
+
+    def _ensure_secure_settings_permissions(self) -> None:
+        if platform.system() == "Windows":
+            return
+        try:
+            if self.settings_file.exists():
+                self.settings_file.chmod(0o600)
+        except Exception:
+            pass
+
+    def _write_settings_file(self, settings: dict) -> None:
+        self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(settings, indent=2, ensure_ascii=False)
+        if platform.system() == "Windows":
+            self.settings_file.write_text(payload, encoding="utf-8")
+            return
+
+        fd = os.open(self.settings_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+        except Exception:
+            os.close(fd)
+            raise
+        try:
+            os.chmod(self.settings_file, 0o600)
+        except Exception:
+            pass
 
     def _get_local_ip(self):
         try:
@@ -905,6 +987,16 @@ class SyncApp(QMainWindow):
         self.settings_confirm_sync_cb.toggled.connect(self.save_settings)
         settings_vbox.addWidget(self.settings_confirm_sync_cb)
 
+        self.settings_auto_scan_cb = QCheckBox(
+            "Automatically scan network on startup"
+        )
+        self.settings_auto_scan_cb.setChecked(False)
+        self.settings_auto_scan_cb.setToolTip(
+            "Only start a LAN scan automatically when this option is enabled."
+        )
+        self.settings_auto_scan_cb.toggled.connect(self.save_settings)
+        settings_vbox.addWidget(self.settings_auto_scan_cb)
+
         settings_vbox.addWidget(_sep())
 
         settings_vbox.addWidget(_section_header("🛠  Advanced: Raw Settings File"))
@@ -1040,7 +1132,7 @@ class SyncApp(QMainWindow):
             self._refresh_rclone_banner()
         cloud_on = enabled
         dest_selected = bool(self._current_dest_mac or self._current_dest_ip)
-        self.sync_button.setVisible(not cloud_on)
+        self.sync_button.setVisible(not cloud_on and dest_selected)
         self.pull_dest_btn.setVisible(not cloud_on and dest_selected)
         self.push_cloud_btn.setVisible(cloud_on)
         self.pull_cloud_btn.setVisible(cloud_on)
@@ -1313,6 +1405,7 @@ class SyncApp(QMainWindow):
         self.direct_sync_status_label.setVisible(True)
         self.warning_label.setVisible(True)
         self.save_settings()
+        self.sync_active = True
 
         self._direct_worker = DirectSyncWorkerThread(
             sync_obj, operation, local_path, remote_path
@@ -1355,6 +1448,7 @@ class SyncApp(QMainWindow):
         self._log_append(msg)
 
     def _on_direct_sync_finished(self, ok: bool, msg: str):
+        self.sync_active = False
         try:
             self.sync_button.clicked.disconnect()
         except Exception:
@@ -1405,7 +1499,7 @@ class SyncApp(QMainWindow):
         )
         rclone_type = "drive" if provider == "gdrive" else "dropbox"
 
-        if not shutil.which("rclone"):
+        if not RCLONE_AVAILABLE:
             status_label.setText("rclone not found — install from rclone.org")
             status_label.setStyleSheet("font-size: 10px; color: red;")
             return
@@ -1422,8 +1516,15 @@ class SyncApp(QMainWindow):
                 try:
                     if platform.system() == "Windows":
                         subprocess.run(
-                            ["taskkill", "/F", "/IM", "rclone.exe"],
+                            [
+                                "powershell",
+                                "-NoLogo",
+                                "-NoProfile",
+                                "-Command",
+                                "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'rclone.exe' -and $_.CommandLine -match 'authorize' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+                            ],
                             capture_output=True,
+                            text=True,
                         )
                     else:
                         subprocess.run(
@@ -1474,10 +1575,10 @@ class SyncApp(QMainWindow):
         """Called on main thread via signal after successful rclone authorize."""
         if provider == "gdrive":
             self.rclone_gdrive = RcloneSync("gdrive", token_json)
-            self.previous_paths["rclone_gdrive_token"] = token_json
+            self._store_rclone_token("gdrive", token_json)
         else:
             self.rclone_dropbox = RcloneSync("dropbox", token_json)
-            self.previous_paths["rclone_dropbox_token"] = token_json
+            self._store_rclone_token("dropbox", token_json)
         self.save_settings()
         self._rclone_auth_ok.emit(provider)
 
@@ -1499,13 +1600,13 @@ class SyncApp(QMainWindow):
         """Clear stored token and reset auth state for the given provider."""
         if provider == "gdrive":
             self.rclone_gdrive = None
-            self.previous_paths.pop("rclone_gdrive_token", None)
+            self._delete_rclone_token("gdrive")
             status_label = self.gd_status_label
             connect_btn = self.gd_connect_btn
             logout_btn = self.gd_logout_btn
         else:
             self.rclone_dropbox = None
-            self.previous_paths.pop("rclone_dropbox_token", None)
+            self._delete_rclone_token("dropbox")
             status_label = self.db_status_label
             connect_btn = self.db_connect_btn
             logout_btn = self.db_logout_btn
@@ -1526,7 +1627,7 @@ class SyncApp(QMainWindow):
 
     def _refresh_rclone_banner(self):
         """Show the rclone-not-found banner only when relevant providers are selected."""
-        rclone_missing = not shutil.which("rclone")
+        rclone_missing = not RCLONE_AVAILABLE
         btn_id = self.cloud_provider_group.checkedId()
         needs_rclone = btn_id in (0, 1, 2)
         self.rclone_banner.setVisible(rclone_missing and needs_rclone)
@@ -1638,6 +1739,7 @@ class SyncApp(QMainWindow):
         self._run_cloud_op("download", cloud_syncs, local_path)
 
     def _run_cloud_op(self, operation: str, cloud_syncs: list, local_path: str):
+        self.sync_active = True
         cloud_folder = self._cloud_folder_for_game()
         name, sync_obj = cloud_syncs[0]
 
@@ -1740,6 +1842,7 @@ class SyncApp(QMainWindow):
             worker.cancel()
 
     def _reset_cloud_buttons(self):
+        self.sync_active = False
         self._cloud_cancelled = False
         try:
             self.push_cloud_btn.clicked.disconnect()
@@ -1876,9 +1979,7 @@ class SyncApp(QMainWindow):
             self.st_json_status.setStyleSheet("font-size: 10px; color: red;")
             return
         try:
-            self.settings_file.write_text(
-                json.dumps(parsed, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            self._write_settings_file(parsed)
             self.previous_paths = parsed
             self.st_json_status.setText("✓ Saved successfully.")
             self.st_json_status.setStyleSheet("font-size: 10px; color: #7ed6a9;")
@@ -1986,6 +2087,10 @@ class SyncApp(QMainWindow):
         self.start_network_scan()
 
     def _should_auto_scan_network(self) -> bool:
+        if not getattr(self, "settings_auto_scan_cb", None):
+            return False
+        if not self.settings_auto_scan_cb.isChecked():
+            return False
         if self._current_dest_mac:
             return False
         if self.scan_dropdown.count() <= 1 and not self.scan_performed:
@@ -2236,7 +2341,8 @@ class SyncApp(QMainWindow):
             return
         self._loading = True
         try:
-            with open(self.settings_file, "r") as f:
+            self._ensure_secure_settings_permissions()
+            with open(self.settings_file, "r", encoding="utf-8") as f:
                 self.previous_paths = json.load(f)
                 game = self.previous_paths.get("game")
                 if game:
@@ -2268,10 +2374,9 @@ class SyncApp(QMainWindow):
                 self._refresh_cloud_folder_default()
                 self._last_game_selected = self.game_dropdown.currentText()
 
-                if self.previous_paths.get("rclone_gdrive_token"):
-                    self.rclone_gdrive = RcloneSync(
-                        "gdrive", self.previous_paths["rclone_gdrive_token"]
-                    )
+                gdrive_token = self._retrieve_rclone_token("gdrive")
+                if gdrive_token:
+                    self.rclone_gdrive = RcloneSync("gdrive", gdrive_token)
                     self.gd_status_label.setText("✓ Authorized")
                     self.gd_status_label.setStyleSheet(
                         "font-size: 10px; color: #7ed6a9;"
@@ -2279,10 +2384,9 @@ class SyncApp(QMainWindow):
                     self.gd_logout_btn.setVisible(True)
                     self.gd_connect_btn.setText("Re-authorize")
 
-                if self.previous_paths.get("rclone_dropbox_token"):
-                    self.rclone_dropbox = RcloneSync(
-                        "dropbox", self.previous_paths["rclone_dropbox_token"]
-                    )
+                dropbox_token = self._retrieve_rclone_token("dropbox")
+                if dropbox_token:
+                    self.rclone_dropbox = RcloneSync("dropbox", dropbox_token)
                     self.db_status_label.setText("✓ Authorized")
                     self.db_status_label.setStyleSheet(
                         "font-size: 10px; color: #7ed6a9;"
@@ -2292,6 +2396,9 @@ class SyncApp(QMainWindow):
 
                 self.settings_confirm_sync_cb.setChecked(
                     self.previous_paths.get("settings_confirm_sync", False)
+                )
+                self.settings_auto_scan_cb.setChecked(
+                    self.previous_paths.get("auto_scan_on_startup", False)
                 )
 
                 self.lm_username_input.setText(
@@ -2409,6 +2516,7 @@ class SyncApp(QMainWindow):
             settings["last_dest_ip"] = self._current_dest_ip
 
         settings["settings_confirm_sync"] = self.settings_confirm_sync_cb.isChecked()
+        settings["auto_scan_on_startup"] = self.settings_auto_scan_cb.isChecked()
 
         settings["cloud_enabled"] = self.cloud_enabled_checkbox.isChecked()
         settings["cloud_provider_idx"] = self.cloud_provider_group.checkedId()
@@ -2416,8 +2524,14 @@ class SyncApp(QMainWindow):
         settings["rclone_gdrive_token"] = self.previous_paths.get(
             "rclone_gdrive_token", ""
         )
+        settings["rclone_gdrive_token_id"] = self.previous_paths.get(
+            "rclone_gdrive_token_id", ""
+        )
         settings["rclone_dropbox_token"] = self.previous_paths.get(
             "rclone_dropbox_token", ""
+        )
+        settings["rclone_dropbox_token_id"] = self.previous_paths.get(
+            "rclone_dropbox_token_id", ""
         )
         settings["lm_ip"] = self.previous_paths.get("lm_ip", "")
         settings["lm_username"] = self.lm_username_input.text()
@@ -2426,8 +2540,7 @@ class SyncApp(QMainWindow):
         settings["lm_ssh_key"] = self.lm_ssh_key_input.text()
 
         try:
-            with open(self.settings_file, "w") as f:
-                json.dump(settings, f, indent=2)
+            self._write_settings_file(settings)
             self.previous_paths = settings
             if hasattr(self, "settings_json_editor"):
                 self.settings_json_editor.setPlainText(

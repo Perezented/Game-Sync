@@ -45,11 +45,9 @@ class NetworkScanner(QThread):
 
     def _get_local_ip(self):
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
         except Exception:
             return None
 
@@ -59,14 +57,12 @@ class NetworkScanner(QThread):
 
         for port, hint in self.OS_PORTS:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.4)
-                if s.connect_ex((ip, port)) == 0:
-                    alive = True
-                    os_type = hint
-                    s.close()
-                    break
-                s.close()
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.4)
+                    if s.connect_ex((ip, port)) == 0:
+                        alive = True
+                        os_type = hint
+                        break
             except Exception:
                 pass
 

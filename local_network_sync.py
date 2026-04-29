@@ -1,3 +1,4 @@
+import os
 import subprocess
 import shutil
 from pathlib import Path
@@ -23,6 +24,7 @@ class LocalNetworkSync:
         ssh_port: int = 22,
         ssh_key: str = "",
         ssh_password: str = "",
+        skip_host_key_checking: bool = False,
     ):
         self.ip = ip
         self.username = username
@@ -30,6 +32,7 @@ class LocalNetworkSync:
         self.ssh_port = ssh_port
         self.ssh_key = ssh_key  # path to private key, optional
         self.ssh_password = ssh_password
+        self.skip_host_key_checking = skip_host_key_checking
 
     def is_authenticated(self) -> bool:
         return bool(self.ip and self.username)
@@ -39,16 +42,16 @@ class LocalNetworkSync:
             "-p",
             str(self.ssh_port),
             "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
             "ConnectTimeout=5",
             "-o",
             "LogLevel=ERROR",
             "-o",
             "PreferredAuthentications=publickey,password",
         ]
+        if self.skip_host_key_checking:
+            opts += ["-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={os.devnull}"]
+        else:
+            opts += ["-o", "StrictHostKeyChecking=accept-new"]
         if batch_mode:
             opts += ["-o", "BatchMode=yes"]
         if self.ssh_key:
@@ -65,8 +68,15 @@ class LocalNetworkSync:
                     "sshpass is required for password authentication. "
                     "Install sshpass or use an SSH key."
                 )
-            return ["sshpass", "-p", self.ssh_password] + cmd
+            return ["sshpass", "-e"] + cmd
         return cmd
+
+    def _sshpass_env(self) -> dict[str, str] | None:
+        if self.ssh_password:
+            env = os.environ.copy()
+            env["SSHPASS"] = self.ssh_password
+            return env
+        return None
 
     def _remote_addr(self, subpath: str = "") -> str:
         return f"{self.username}@{self.ip}:{self.remote_base}/{subpath.lstrip('/')}"
@@ -102,6 +112,7 @@ class LocalNetworkSync:
                 + self._ssh_opts(batch_mode=batch_mode)
                 + [f"{self.username}@{self.ip}", "echo OK"]
             )
+            env = self._sshpass_env()
         except Exception as exc:
             return False, str(exc)
         try:
@@ -111,6 +122,7 @@ class LocalNetworkSync:
                 text=True,
                 timeout=8,
                 stdin=subprocess.DEVNULL,
+                env=env,
             )
             if result.returncode == 0:
                 return True, "Connection successful."
@@ -158,8 +170,13 @@ class LocalNetworkSync:
                 # parent-not-found as PermissionError instead of ENOENT.
                 try:
                     sftp.mkdir(path)
-                except OSError:
-                    pass  # already exists or skip — stat on next iteration catches real failures
+                except OSError as exc:
+                    try:
+                        sftp.stat(path)
+                    except OSError:
+                        raise RuntimeError(
+                            f"Could not create remote directory: {path} ({exc})"
+                        ) from exc
 
     def _sftp_put_recursive(
         self, sftp, local: Path, remote: str, on_line=None, cancelled=None
