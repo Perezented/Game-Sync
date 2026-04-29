@@ -39,6 +39,99 @@ Download the latest prebuilt binary from the [Releases page](https://github.com/
 - **Windows:** `game-sync.exe`
 - **Linux / Steam Deck:** `game-sync` (no file extension)
 
+### Installer / Updater Scripts
+
+The repo includes interactive installer scripts that handle downloading, placement, desktop launchers, optional SSH setup, and optional rclone (cloud sync). They also detect an existing install and offer to update it.
+
+#### Linux / Steam Deck — `install.sh`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.sh | bash
+```
+
+Or download [install.sh](install.sh) and run it locally:
+
+```bash
+bash install.sh
+```
+
+The script will:
+- Auto-detect your OS (Steam Deck, Arch, Ubuntu, Fedora, openSUSE, etc.) with a manual override option
+- Download the correct binary and place it in `~/Applications` (Steam Deck) or `~/.local/bin` (Linux)
+- Create a `~/.local/share/applications/game-sync.desktop` launcher
+- Optionally add the install directory to `PATH`
+- Optionally enable SSH so other machines can sync to this one
+- Optionally install rclone for Google Drive / Dropbox cloud saves (home-directory method on Steam Deck)
+- Detect an existing install and offer to update it
+
+#### Windows — `install.ps1`
+
+Open **PowerShell** (no admin required unless you choose to enable SSH) and run:
+
+```powershell
+irm https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.ps1 | iex
+```
+
+Or download [install.ps1](install.ps1) and run it:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+```
+
+The script will:
+- Download `game-sync.exe` to `%LOCALAPPDATA%\GameSync\` (customisable)
+- Add the install folder to your user `PATH`
+- Create a Start Menu shortcut (and optionally a Desktop shortcut)
+- Optionally enable OpenSSH Server (self-elevates to admin as needed)
+- Optionally install rclone for cloud saves
+- Detect an existing install and offer to update it
+
+---
+
+## Uninstalling
+
+### Linux / Steam Deck
+
+Run the installer script with the `--uninstall` flag:
+
+```bash
+bash install.sh --uninstall
+```
+
+Or manually:
+
+```bash
+# Remove binary (Steam Deck default location)
+rm -f ~/Applications/game-sync ~/Applications/game-sync.bak
+
+# Remove binary (Linux default location)
+rm -f ~/.local/bin/game-sync ~/.local/bin/game-sync.bak
+
+# Remove desktop launcher
+rm -f ~/.local/share/applications/game-sync.desktop
+
+# Remove saved settings (optional — contains your sync paths and preferences)
+rm -f ~/game_sync_settings.json
+```
+
+### Windows
+
+Run the installer script with the `-Uninstall` flag:
+
+```powershell
+.\install.ps1 -Uninstall
+```
+
+Or manually:
+
+1. Delete `%LOCALAPPDATA%\GameSync\` (or wherever you installed it)
+2. Delete shortcuts:
+   - Start Menu: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Game Sync.lnk`
+   - Desktop: `%USERPROFILE%\Desktop\Game Sync.lnk`
+3. Remove from PATH: **Settings → System → About → Advanced system settings → Environment Variables** → edit `Path` under *User variables* and remove the GameSync entry
+4. Delete saved settings (optional): `%APPDATA%\game_sync_settings.json`
+
 ---
 
 ## Windows (Desktop App)
@@ -57,25 +150,13 @@ That is it. No Python install required.
 
 ### Quick Install (recommended)
 
-Switch to **Desktop Mode**, open **Konsole**, and run this single command:
+Switch to **Desktop Mode**, open **Konsole**, and run:
 
 ```bash
-curl -fsSL https://github.com/Perezented/Game-Sync/releases/latest/download/game-sync \
-  -o ~/Applications/game-sync \
-  --create-dirs \
-&& chmod +x ~/Applications/game-sync \
-&& mkdir -p ~/.local/share/applications \
-&& cat > ~/.local/share/applications/game-sync.desktop << 'EOF'
-[Desktop Entry]
-Type=Application
-Name=Game Sync
-Exec=/home/deck/Applications/game-sync
-Icon=utilities-terminal
-Terminal=false
-Categories=Utility;
-EOF
-&& echo "✓ Game Sync installed. Run: ~/Applications/game-sync"
+curl -fsSL https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.sh | bash
 ```
+
+The installer handles everything: OS detection, binary download, desktop launcher, optional SSH, and optional rclone. It also detects an existing install and offers to update it.
 
 After it finishes, launch from **Konsole** (`~/Applications/game-sync`) or find **Game Sync** in the KDE app menu.
 
@@ -276,10 +357,21 @@ Requires [PyInstaller](https://pyinstaller.org/):
 
 ```bash
 pip install pyinstaller
+```
+
+Use the included spec file (bundles `app_icon.png` correctly):
+
+```bash
+python -m PyInstaller game-sync.spec
+```
+
+Or build manually (icon asset will need to be present):
+
+```bash
 pyinstaller --onefile --windowed --icon=app_icon.ico game-sync.py
 ```
 
-The output binary will be in `dist/game-sync`.
+The output binary will be in `dist/`.
 
 ## Sync Engine (CLI)
 
