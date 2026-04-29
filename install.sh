@@ -452,7 +452,7 @@ uninstall() {
     local default_dir
     default_dir="$(default_install_dir)"
 
-    # Find all likely binary locations
+    # ── Find binary ────────────────────────────────────────────────────────────
     local candidates=(
         "${default_dir}/${BINARY_NAME}"
         "$HOME/.local/bin/${BINARY_NAME}"
@@ -470,51 +470,104 @@ uninstall() {
         warn "Game Sync binary not found in any standard location."
         ask "Enter the full path to the game-sync binary (or press Enter to skip):"
         read -rp "Path: " custom_path
-        if [[ -n "$custom_path" && -f "$custom_path" ]]; then
-            found_path="$custom_path"
+        # Trim leading/trailing whitespace only — preserve internal spaces (valid in paths)
+        custom_path="${custom_path#"${custom_path%%[! ]*}"}"   # ltrim
+        custom_path="${custom_path%"${custom_path##*[! ]}"}"   # rtrim
+
+        if [[ -n "$custom_path" ]]; then
+            if [[ -d "$custom_path" ]]; then
+                error "'$custom_path' is a directory, not a file. Aborting binary removal."
+                custom_path=""
+            elif [[ "$(basename "$custom_path")" != "$BINARY_NAME" ]]; then
+                warn "Warning: '$(basename "$custom_path")' does not look like the Game Sync binary."
+                warn "Expected filename: $BINARY_NAME"
+                echo -e "  Full path: ${BOLD}${custom_path}${RESET}"
+                ask "Are you sure this is the correct file?"
+                read -rp "  Type 'yes' to confirm, or press Enter to cancel: " path_confirm
+                [[ "${path_confirm,,}" != "yes" ]] && { info "Binary removal cancelled."; custom_path=""; }
+            elif [[ ! -f "$custom_path" ]]; then
+                error "File not found: $custom_path"
+                custom_path=""
+            fi
         fi
+
+        [[ -n "$custom_path" ]] && found_path="$custom_path"
     fi
 
+    # ── Remove binary ──────────────────────────────────────────────────────────
     if [[ -n "$found_path" ]]; then
-        info "Found binary: $found_path"
-        ask "Remove it?"
-        read -rp "Choice [Y/n, default Y]: " remove_bin
-        if [[ "${remove_bin:-Y,,}" != "n" ]]; then
+        echo ""
+        info "The following file will be deleted:"
+        echo -e "    ${BOLD}${found_path}${RESET}"
+        [[ -f "${found_path}.bak" ]] && \
+            echo -e "    ${BOLD}${found_path}.bak${RESET}  (backup)"
+        ask "Confirm removal?"
+        read -rp "  Type 'yes' to delete, or press Enter to skip: " remove_bin
+        if [[ "${remove_bin,,}" == "yes" ]]; then
             rm -f "$found_path"
-            # Also remove .bak if present
             rm -f "${found_path}.bak"
             success "Removed: $found_path"
-            # Remove install dir if now empty
+
+            # ── Optionally remove parent directory if empty ─────────────────────
             local dir
             dir="$(dirname "$found_path")"
             if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
-                rmdir "$dir" && info "Removed empty directory: $dir"
+                echo ""
+                warn "The directory containing the binary is now empty:"
+                echo -e "    ${BOLD}${dir}${RESET}"
+                # Warn if this is NOT one of the known safe install dirs
+                local is_known_dir=false
+                local known_dirs=("$HOME/.local/bin" "$HOME/Applications" "$default_dir")
+                for kd in "${known_dirs[@]}"; do
+                    [[ "$dir" == "$kd" ]] && { is_known_dir=true; break; }
+                done
+                if ! $is_known_dir; then
+                    warn "This is a custom directory — deleting it will remove the entire folder."
+                    warn "Make sure it does not contain other files you want to keep."
+                fi
+                ask "Delete this empty directory?"
+                read -rp "  Type 'yes' to delete the directory, or press Enter to keep it: " rm_dir
+                if [[ "${rm_dir,,}" == "yes" ]]; then
+                    rmdir "$dir" && success "Removed empty directory: $dir"
+                else
+                    info "Directory kept: $dir"
+                fi
             fi
+        else
+            info "Binary removal skipped."
         fi
     else
         warn "No binary found — skipping binary removal."
     fi
 
-    # Remove desktop launcher
+    # ── Remove desktop launcher ────────────────────────────────────────────────
     if [[ -f "$DESKTOP_FILE" ]]; then
-        ask "Remove desktop launcher ($DESKTOP_FILE)?"
-        read -rp "Choice [Y/n, default Y]: " remove_desktop
-        if [[ "${remove_desktop:-Y,,}" != "n" ]]; then
+        echo ""
+        info "The following file will be deleted:"
+        echo -e "    ${BOLD}${DESKTOP_FILE}${RESET}"
+        ask "Remove desktop launcher?"
+        read -rp "  Type 'yes' to delete, or press Enter to skip: " remove_desktop
+        if [[ "${remove_desktop,,}" == "yes" ]]; then
             rm -f "$DESKTOP_FILE"
             command -v update-desktop-database &>/dev/null \
                 && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
             success "Removed: $DESKTOP_FILE"
+        else
+            info "Desktop launcher kept."
         fi
     else
         info "No desktop launcher found — skipping."
     fi
 
-    # Remove settings file
+    # ── Remove settings file ───────────────────────────────────────────────────
     local settings="$HOME/game_sync_settings.json"
     if [[ -f "$settings" ]]; then
-        ask "Remove saved settings ($settings)?"
-        read -rp "Choice [y/N, default N]: " remove_settings
-        if [[ "${remove_settings,,}" == "y" ]]; then
+        echo ""
+        info "The following file will be deleted (contains your sync paths and preferences):"
+        echo -e "    ${BOLD}${settings}${RESET}"
+        ask "Remove saved settings? (default: keep)"
+        read -rp "  Type 'yes' to delete, or press Enter to keep: " remove_settings
+        if [[ "${remove_settings,,}" == "yes" ]]; then
             rm -f "$settings"
             success "Removed: $settings"
         else
@@ -522,15 +575,27 @@ uninstall() {
         fi
     fi
 
-    # Offer to clean up PATH entry in .bashrc
+    # ── Clean up PATH entry in .bashrc (precise match only) ────────────────────
     local install_dir
     install_dir="$(dirname "${found_path:-/nonexistent}")"
-    if [[ -f "$HOME/.bashrc" ]] && grep -q "$install_dir" "$HOME/.bashrc" 2>/dev/null; then
-        ask "Remove PATH entry for $install_dir from ~/.bashrc?"
-        read -rp "Choice [Y/n, default Y]: " remove_path
-        if [[ "${remove_path:-Y,,}" != "n" ]]; then
-            sed -i "\|${install_dir}|d" "$HOME/.bashrc"
-            success "Removed PATH entry from ~/.bashrc"
+    if [[ -f "$HOME/.bashrc" ]]; then
+        # Match only the exact export line added by the installer, not any line
+        # that merely contains the directory path (avoids collateral deletion).
+        local exact_pattern="export PATH=\"${install_dir}:\$PATH\""
+        if grep -qF "$exact_pattern" "$HOME/.bashrc" 2>/dev/null; then
+            echo ""
+            info "Found this line in ~/.bashrc that was added by the installer:"
+            echo -e "    ${BOLD}${exact_pattern}${RESET}"
+            ask "Remove it?"
+            read -rp "  Type 'yes' to remove, or press Enter to keep: " remove_path
+            if [[ "${remove_path,,}" == "yes" ]]; then
+                local tmprc
+                tmprc="$(mktemp)"
+                grep -vF "$exact_pattern" "$HOME/.bashrc" > "$tmprc" && mv "$tmprc" "$HOME/.bashrc"
+                success "Removed PATH entry from ~/.bashrc"
+            else
+                info "~/.bashrc left unchanged."
+            fi
         fi
     fi
 

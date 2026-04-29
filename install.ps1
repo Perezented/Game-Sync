@@ -360,7 +360,7 @@ function Uninstall-GameSync {
     Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Red
     Write-Host ""
 
-    # Search common install locations
+    # ── Find binary ────────────────────────────────────────────────────────────
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "GameSync\game-sync.exe"),
         (Join-Path $env:PROGRAMFILES "GameSync\game-sync.exe"),
@@ -375,69 +375,147 @@ function Uninstall-GameSync {
         Write-Warn "Game Sync not found in any standard location."
         Ask "Enter the full path to game-sync.exe (or press Enter to skip):"
         $custom = (Read-Host "  Path").Trim()
-        if ($custom -ne "" -and (Test-Path $custom)) { $foundPath = $custom }
+        if ($custom -ne "") {
+            # Reject directories
+            if ((Test-Path $custom) -and (Get-Item $custom -ErrorAction SilentlyContinue).PSIsContainer) {
+                Write-Warn "'$custom' is a directory, not a file. Skipping binary removal."
+                $custom = ""
+            # Warn on filename mismatch
+            } elseif ([System.IO.Path]::GetFileName($custom) -ne "game-sync.exe") {
+                Write-Warn "Warning: '$([System.IO.Path]::GetFileName($custom))' does not look like the Game Sync binary."
+                Write-Warn "Expected filename: game-sync.exe"
+                Write-Host "  Full path: $custom" -ForegroundColor Yellow
+                Ask "Are you sure this is the correct file?"
+                $pathConfirm = (Read-Host "  Type 'yes' to confirm, or press Enter to cancel").Trim().ToLower()
+                if ($pathConfirm -ne "yes") {
+                    Write-Info "Binary removal cancelled."
+                    $custom = ""
+                } elseif (-not (Test-Path $custom)) {
+                    Write-Warn "File not found: $custom"
+                    $custom = ""
+                }
+            } elseif (-not (Test-Path $custom)) {
+                Write-Warn "File not found: $custom"
+                $custom = ""
+            }
+        }
+        if ($custom -ne "") { $foundPath = $custom }
     }
 
+    # ── Remove binary ──────────────────────────────────────────────────────────
     if ($foundPath) {
-        Write-Info "Found binary: $foundPath"
-        $removeBin = Prompt-YesNo "Remove it?" $true
-        if ($removeBin) {
-            # Remove binary and .bak
+        Write-Host ""
+        Write-Info "The following file will be deleted:"
+        Write-Host "    $foundPath" -ForegroundColor White
+        if (Test-Path "$foundPath.bak") {
+            Write-Host "    $foundPath.bak  (backup)" -ForegroundColor White
+        }
+        Ask "Confirm removal?"
+        $removeBin = (Read-Host "  Type 'yes' to delete, or press Enter to skip").Trim().ToLower()
+        if ($removeBin -eq "yes") {
             Remove-Item $foundPath -Force -ErrorAction SilentlyContinue
             Remove-Item "$foundPath.bak" -Force -ErrorAction SilentlyContinue
             Write-Ok "Removed: $foundPath"
-            # Remove rclone.exe in same folder if present
+
+            # Ask about rclone.exe in same folder
             $rcloneInDir = Join-Path (Split-Path $foundPath) "rclone.exe"
             if (Test-Path $rcloneInDir) {
-                $removeRclone = Prompt-YesNo "Also remove rclone.exe from the same folder?" $false
-                if ($removeRclone) {
+                Write-Host ""
+                Write-Info "The following file will be deleted:"
+                Write-Host "    $rcloneInDir" -ForegroundColor White
+                Ask "Also remove rclone.exe from the install folder?"
+                $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+                if ($removeRclone -eq "yes") {
                     Remove-Item $rcloneInDir -Force
                     Write-Ok "Removed: $rcloneInDir"
+                } else {
+                    Write-Info "rclone.exe kept."
                 }
             }
-            # Remove install dir if empty
+
+            # Optionally remove now-empty install directory
             $dir = Split-Path $foundPath
             if ((Test-Path $dir) -and ((Get-ChildItem $dir -Force | Measure-Object).Count -eq 0)) {
-                Remove-Item $dir -Force
-                Write-Info "Removed empty directory: $dir"
+                Write-Host ""
+                Write-Warn "The directory containing the binary is now empty:"
+                Write-Host "    $dir" -ForegroundColor White
+                $knownDirs = @(
+                    "$env:LOCALAPPDATA\GameSync",
+                    "$env:PROGRAMFILES\GameSync"
+                )
+                if ($dir -notin $knownDirs) {
+                    Write-Warn "This is a custom directory — deleting it will remove the entire folder."
+                    Write-Warn "Make sure it does not contain other files you want to keep."
+                }
+                Ask "Delete this empty directory?"
+                $rmDir = (Read-Host "  Type 'yes' to delete the directory, or press Enter to keep it").Trim().ToLower()
+                if ($rmDir -eq "yes") {
+                    Remove-Item $dir -Force
+                    Write-Ok "Removed empty directory: $dir"
+                } else {
+                    Write-Info "Directory kept: $dir"
+                }
             }
+        } else {
+            Write-Info "Binary removal skipped."
         }
     } else {
         Write-Warn "No binary found — skipping binary removal."
     }
 
-    # Remove Start Menu shortcut
+    # ── Remove Start Menu shortcut ─────────────────────────────────────────────
     $startMenuLnk = Join-Path $ShortcutDir "Game Sync.lnk"
     if (Test-Path $startMenuLnk) {
-        $removeStart = Prompt-YesNo "Remove Start Menu shortcut?" $true
-        if ($removeStart) { Remove-Item $startMenuLnk -Force; Write-Ok "Removed: $startMenuLnk" }
+        Write-Host ""
+        Write-Info "The following file will be deleted:"
+        Write-Host "    $startMenuLnk" -ForegroundColor White
+        Ask "Remove Start Menu shortcut?"
+        $removeStart = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+        if ($removeStart -eq "yes") { Remove-Item $startMenuLnk -Force; Write-Ok "Removed: $startMenuLnk" }
+        else { Write-Info "Start Menu shortcut kept." }
     } else { Write-Info "No Start Menu shortcut found." }
 
-    # Remove Desktop shortcut
+    # ── Remove Desktop shortcut ────────────────────────────────────────────────
     $desktopLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Game Sync.lnk"
     if (Test-Path $desktopLnk) {
-        $removeDesk = Prompt-YesNo "Remove Desktop shortcut?" $true
-        if ($removeDesk) { Remove-Item $desktopLnk -Force; Write-Ok "Removed: $desktopLnk" }
+        Write-Host ""
+        Write-Info "The following file will be deleted:"
+        Write-Host "    $desktopLnk" -ForegroundColor White
+        Ask "Remove Desktop shortcut?"
+        $removeDesk = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+        if ($removeDesk -eq "yes") { Remove-Item $desktopLnk -Force; Write-Ok "Removed: $desktopLnk" }
+        else { Write-Info "Desktop shortcut kept." }
     } else { Write-Info "No Desktop shortcut found." }
 
-    # Remove settings file
+    # ── Remove settings file ───────────────────────────────────────────────────
     $settings = Join-Path $env:APPDATA "game_sync_settings.json"
     if (Test-Path $settings) {
-        $removeSettings = Prompt-YesNo "Remove saved settings ($settings)?" $false
-        if ($removeSettings) { Remove-Item $settings -Force; Write-Ok "Removed: $settings" }
+        Write-Host ""
+        Write-Info "The following file will be deleted (contains your sync paths and preferences):"
+        Write-Host "    $settings" -ForegroundColor White
+        Ask "Remove saved settings? (default: keep)"
+        $removeSettings = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+        if ($removeSettings -eq "yes") { Remove-Item $settings -Force; Write-Ok "Removed: $settings" }
         else { Write-Info "Settings kept at $settings" }
     }
 
-    # Remove from user PATH
+    # ── Remove from user PATH (exact entry match only) ─────────────────────────
     if ($foundPath) {
         $installDir = Split-Path $foundPath
         $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if ($currentPath -like "*$installDir*") {
-            $removePath = Prompt-YesNo "Remove $installDir from user PATH?" $true
-            if ($removePath) {
-                $newPath = ($currentPath -split ';' | Where-Object { $_ -ne $installDir }) -join ';'
+        $pathEntries = $currentPath -split ';'
+        if ($pathEntries -contains $installDir) {
+            Write-Host ""
+            Write-Info "Found this user PATH entry added by the installer:"
+            Write-Host "    $installDir" -ForegroundColor White
+            Ask "Remove it from user PATH?"
+            $removePath = (Read-Host "  Type 'yes' to remove, or press Enter to keep").Trim().ToLower()
+            if ($removePath -eq "yes") {
+                $newPath = ($pathEntries | Where-Object { $_ -ne $installDir }) -join ';'
                 [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
                 Write-Ok "Removed $installDir from user PATH"
+            } else {
+                Write-Info "PATH left unchanged."
             }
         }
     }
