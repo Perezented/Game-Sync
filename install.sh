@@ -18,6 +18,16 @@ error()   { echo -e "${RED}✗ $*${RESET}" >&2; }
 header()  { echo -e "\n${BOLD}${CYAN}$*${RESET}\n"; }
 ask()     { echo -e "${BOLD}${YELLOW}$*${RESET}"; }
 
+read_prompt() {
+    local prompt="$1"
+    local varname="$2"
+    if [[ -r /dev/tty ]]; then
+        read -r -p "$prompt" "$varname" < /dev/tty
+    else
+        read -r -p "$prompt" "$varname"
+    fi
+}
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 REPO="Perezented/Game-Sync"
 BINARY_NAME="game-sync"
@@ -198,7 +208,7 @@ main() {
     ask "Is '${detected_category:-Not detected}' correct?"
     echo "  1) Yes — continue with detected OS"
     echo "  2) No  — let me choose manually"
-    read -rp "Choice [1/2, default 1]: " os_confirm
+    read_prompt "Choice [1/2, default 1]: " os_confirm
     os_confirm="${os_confirm:-1}"
 
     if [[ "$os_confirm" != "1" ]]; then
@@ -209,7 +219,7 @@ main() {
         echo "  4) Fedora / RHEL / Rocky"
         echo "  5) openSUSE"
         echo "  6) Other Linux"
-        read -rp "Choice [1-6]: " os_choice
+        read_prompt "Choice [1-6]: " os_choice
         case "$os_choice" in
             1) IS_STEAM_DECK=true;  OS_NAME="steamos" ;;
             2) IS_STEAM_DECK=false; OS_NAME="ubuntu"  ;;
@@ -230,7 +240,7 @@ main() {
 
     ask "Where should Game Sync be installed?"
     echo "  Default: ${install_dir}"
-    read -rp "Press Enter to accept, or type a path: " custom_dir
+    read_prompt "Press Enter to accept, or type a path: " custom_dir
     if [[ -n "$custom_dir" ]]; then
         install_dir="$custom_dir"
     fi
@@ -266,7 +276,7 @@ main() {
     if $is_update; then
         if [[ "$installed_ver" == "$latest_ver" ]]; then
             ask "You already have the latest version ($latest_ver). Re-install / force update?"
-            read -rp "Choice [y/N, default N]: " force_update
+            read_prompt "Choice [y/N, default N]: " force_update
             force_update="${force_update:-N}"
             if [[ "${force_update,,}" != "y" ]]; then
                 info "Skipping download — nothing to update."
@@ -276,7 +286,7 @@ main() {
             fi
         else
             ask "Update from ${installed_ver} → ${latest_ver}?"
-            read -rp "Choice [Y/n, default Y]: " do_update
+            read_prompt "Choice [Y/n, default Y]: " do_update
             do_update="${do_update:-Y}"
             if [[ "${do_update,,}" != "y" ]]; then
                 info "Update cancelled."
@@ -320,7 +330,7 @@ goto_post_install() {
     if ! echo "$PATH" | grep -q "$install_dir"; then
         warn "$install_dir is not currently in your PATH."
         ask "Add it to ~/.bashrc automatically?"
-        read -rp "Choice [Y/n, default Y]: " add_path
+        read_prompt "Choice [Y/n, default Y]: " add_path
         add_path="${add_path:-Y}"
         if [[ "${add_path,,}" == "y" ]]; then
             if ! grep -q "$install_dir" "$HOME/.bashrc" 2>/dev/null; then
@@ -338,14 +348,14 @@ goto_post_install() {
     if [[ -f "$DESKTOP_FILE" ]]; then
         info "Desktop launcher already exists: $DESKTOP_FILE"
         ask "Re-create it (updates Exec path)?"
-        read -rp "Choice [Y/n, default Y]: " redo_desktop
+        read_prompt "Choice [Y/n, default Y]: " redo_desktop
         redo_desktop="${redo_desktop:-Y}"
         if [[ "${redo_desktop,,}" == "y" ]]; then
             create_desktop_entry "$install_path"
         fi
     else
         ask "Create a desktop launcher (adds Game Sync to your app menu)?"
-        read -rp "Choice [Y/n, default Y]: " make_desktop
+        read_prompt "Choice [Y/n, default Y]: " make_desktop
         make_desktop="${make_desktop:-Y}"
         if [[ "${make_desktop,,}" == "y" ]]; then
             create_desktop_entry "$install_path"
@@ -359,7 +369,7 @@ goto_post_install() {
 
     ask "Enable SSH on this machine now? (allows other machines to push saves here)"
     echo "  Note: you can always enable it later with: sudo systemctl enable --now sshd"
-    read -rp "Choice [y/N, default N]: " enable_ssh
+    read_prompt "Choice [y/N, default N]: " enable_ssh
     enable_ssh="${enable_ssh:-N}"
     if [[ "${enable_ssh,,}" == "y" ]]; then
         if command -v systemctl &>/dev/null; then
@@ -372,7 +382,7 @@ goto_post_install() {
         # Prompt for password if on Steam Deck (common to have no password set)
         if $IS_STEAM_DECK; then
             ask "Set a password for the 'deck' user (required for SSH login)?"
-            read -rp "Choice [y/N, default N]: " set_pass
+            read_prompt "Choice [y/N, default N]: " set_pass
             if [[ "${set_pass,,}" == "y" ]]; then
                 passwd
             fi
@@ -395,7 +405,7 @@ goto_post_install() {
     fi
 
     ask "Install rclone for cloud saves (Google Drive / Dropbox)?"
-    read -rp "Choice [y/N, default N]: " want_rclone
+    read_prompt "Choice [y/N, default N]: " want_rclone
     want_rclone="${want_rclone:-N}"
 
     if [[ "${want_rclone,,}" == "y" ]]; then
@@ -405,7 +415,7 @@ goto_post_install() {
             ask "Install method:"
             echo "  1) System install via official rclone script (recommended, requires sudo)"
             echo "  2) Home directory (~/.local/bin) — safer on read-only / managed OSes"
-            read -rp "Choice [1/2, default 1]: " rclone_method
+            read_prompt "Choice [1/2, default 1]: " rclone_method
             rclone_method="${rclone_method:-1}"
             if [[ "$rclone_method" == "2" ]]; then
                 install_rclone_home
@@ -469,7 +479,7 @@ uninstall() {
     if [[ -z "$found_path" ]]; then
         warn "Game Sync binary not found in any standard location."
         ask "Enter the full path to the game-sync binary (or press Enter to skip):"
-        read -rp "Path: " custom_path
+        read_prompt "Path: " custom_path
         # Trim leading/trailing whitespace only — preserve internal spaces (valid in paths)
         custom_path="${custom_path#"${custom_path%%[! ]*}"}"   # ltrim
         custom_path="${custom_path%"${custom_path##*[! ]}"}"   # rtrim
@@ -483,7 +493,7 @@ uninstall() {
                 warn "Expected filename: $BINARY_NAME"
                 echo -e "  Full path: ${BOLD}${custom_path}${RESET}"
                 ask "Are you sure this is the correct file?"
-                read -rp "  Type 'yes' to confirm, or press Enter to cancel: " path_confirm
+                read_prompt "  Type 'yes' to confirm, or press Enter to cancel: " path_confirm
                 [[ "${path_confirm,,}" != "yes" ]] && { info "Binary removal cancelled."; custom_path=""; }
             elif [[ ! -f "$custom_path" ]]; then
                 error "File not found: $custom_path"
@@ -502,7 +512,7 @@ uninstall() {
         [[ -f "${found_path}.bak" ]] && \
             echo -e "    ${BOLD}${found_path}.bak${RESET}  (backup)"
         ask "Confirm removal?"
-        read -rp "  Type 'yes' to delete, or press Enter to skip: " remove_bin
+        read_prompt "  Type 'yes' to delete, or press Enter to skip: " remove_bin
         if [[ "${remove_bin,,}" == "yes" ]]; then
             rm -f "$found_path"
             rm -f "${found_path}.bak"
@@ -526,7 +536,7 @@ uninstall() {
                     warn "Make sure it does not contain other files you want to keep."
                 fi
                 ask "Delete this empty directory?"
-                read -rp "  Type 'yes' to delete the directory, or press Enter to keep it: " rm_dir
+                read_prompt "  Type 'yes' to delete the directory, or press Enter to keep it: " rm_dir
                 if [[ "${rm_dir,,}" == "yes" ]]; then
                     rmdir "$dir" && success "Removed empty directory: $dir"
                 else
@@ -546,7 +556,7 @@ uninstall() {
         info "The following file will be deleted:"
         echo -e "    ${BOLD}${DESKTOP_FILE}${RESET}"
         ask "Remove desktop launcher?"
-        read -rp "  Type 'yes' to delete, or press Enter to skip: " remove_desktop
+        read_prompt "  Type 'yes' to delete, or press Enter to skip: " remove_desktop
         if [[ "${remove_desktop,,}" == "yes" ]]; then
             rm -f "$DESKTOP_FILE"
             command -v update-desktop-database &>/dev/null \
@@ -566,7 +576,7 @@ uninstall() {
         info "The following file will be deleted (contains your sync paths and preferences):"
         echo -e "    ${BOLD}${settings}${RESET}"
         ask "Remove saved settings? (default: keep)"
-        read -rp "  Type 'yes' to delete, or press Enter to keep: " remove_settings
+        read_prompt "  Type 'yes' to delete, or press Enter to keep: " remove_settings
         if [[ "${remove_settings,,}" == "yes" ]]; then
             rm -f "$settings"
             success "Removed: $settings"
@@ -587,7 +597,7 @@ uninstall() {
             info "Found this line in ~/.bashrc that was added by the installer:"
             echo -e "    ${BOLD}${exact_pattern}${RESET}"
             ask "Remove it?"
-            read -rp "  Type 'yes' to remove, or press Enter to keep: " remove_path
+            read_prompt "  Type 'yes' to remove, or press Enter to keep: " remove_path
             if [[ "${remove_path,,}" == "yes" ]]; then
                 local tmprc
                 tmprc="$(mktemp)"
