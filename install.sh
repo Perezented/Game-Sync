@@ -372,14 +372,20 @@ goto_post_install() {
     echo -e "  To sync ${BOLD}to${RESET} this machine, SSH must be enabled."
 
     ask "Enable SSH on this machine now? (allows other machines to push saves here)"
-    echo "  Note: you can always enable it later with: sudo systemctl enable --now sshd"
+    echo "  Note: you can always enable it later with one of:"
+    echo "        sudo systemctl enable --now ssh"
+    echo "        sudo systemctl enable --now sshd"
     read_prompt "Choice [y/N, default N]: " enable_ssh
     enable_ssh="${enable_ssh:-N}"
     if [[ "${enable_ssh,,}" == "y" ]]; then
         if command -v systemctl &>/dev/null; then
-            sudo systemctl enable --now sshd \
-                && success "SSH enabled and started." \
-                || warn "Could not start sshd. Run manually: sudo systemctl enable --now sshd"
+            if sudo systemctl enable --now ssh; then
+                success "SSH enabled and started."
+            elif sudo systemctl enable --now sshd; then
+                success "SSH enabled and started."
+            else
+                warn "Could not start SSH. Run manually: sudo systemctl enable --now ssh or sudo systemctl enable --now sshd"
+            fi
         else
             warn "systemctl not found. Enable SSH manually for your distribution."
         fi
