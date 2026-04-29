@@ -9,7 +9,7 @@
 .LINK
     https://github.com/Perezented/Game-Sync
 #>
-
+param([switch]$SSHOnly, [switch]$Uninstall)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -132,12 +132,31 @@ function Install-Rclone {
     }
 }
 
+# ── Path helper functions ───────────────────────────────────────────────────
+function Get-PathEntries {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return @()
+    }
+    return $PathValue -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }
+}
+
+function PathContainsEntry {
+    param(
+        [string]$PathValue,
+        [string]$Entry
+    )
+    $entries = Get-PathEntries $PathValue
+    return $entries -contains $Entry
+}
+
 # ── Add folder to user PATH ───────────────────────────────────────────────────
 function Add-ToUserPath {
     param([string]$Dir)
     $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($current -notlike "*$Dir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$current;$Dir", "User")
+    if (-not (PathContainsEntry -PathValue $current -Entry $Dir)) {
+        $newPath = if ([string]::IsNullOrWhiteSpace($current)) { $Dir } else { "$current;$Dir" }
+        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
         $env:Path += ";$Dir"
         Write-Ok "Added $Dir to user PATH (takes effect in new terminals)"
     } else {
@@ -275,7 +294,7 @@ function Post-Install {
 
     # ── Add to PATH ────────────────────────────────────────────────────────────
     Write-Header "Step 5 — PATH"
-    if ($env:Path -notlike "*$InstallDir*") {
+    if (-not (PathContainsEntry -PathValue $env:Path -Entry $InstallDir)) {
         $addPath = Prompt-YesNo "Add $InstallDir to your user PATH? (lets you run 'game-sync' from any terminal)" $true
         if ($addPath) { Add-ToUserPath -Dir $InstallDir }
     } else {
@@ -509,8 +528,8 @@ function Uninstall-GameSync {
     if ($foundPath) {
         $installDir = Split-Path $foundPath
         $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $pathEntries = $currentPath -split ';'
-        if ($pathEntries -contains $installDir) {
+        if (PathContainsEntry -PathValue $currentPath -Entry $installDir) {
+            $pathEntries = Get-PathEntries $currentPath
             Write-Host ""
             Write-Info "Found this user PATH entry added by the installer:"
             Write-Host "    $installDir" -ForegroundColor White
@@ -535,7 +554,6 @@ function Uninstall-GameSync {
 }
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-param([switch]$SSHOnly, [switch]$Uninstall)
 if ($SSHOnly) {
     Enable-SshServer
     Read-Host "Press Enter to exit"
