@@ -930,6 +930,18 @@ class ConnectionTestThread(QThread):
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Game defaults embedded at build time so the app works without game_defaults.json
+GAME_DEFAULTS: list[dict] = [
+    {
+        "name": "Project Zomboid",
+        "defaults": {
+            "windows": "%USERPROFILE%\\Zomboid\\Saves",
+            "linux": "~/Zomboid/Saves",
+            "steamdeck": "~/Zomboid/Saves",
+        },
+    },
+]
+
 
 class SyncApp(QMainWindow):
 
@@ -3114,15 +3126,9 @@ class SyncApp(QMainWindow):
     # ── Data / settings ───────────────────────────────────────────────────────
 
     def load_game_defaults(self):
-        try:
-            defaults_path = Path(__file__).parent / "game_defaults.json"
-            with open(defaults_path, "r") as f:
-                data = json.load(f)
-                for game in data["games"]:
-                    self.game_defaults[game["name"]] = game["defaults"]
-            self.game_dropdown.addItems(self.game_defaults.keys())
-        except Exception as err:
-            print(f"Error loading game defaults: {err}")
+        for game in GAME_DEFAULTS:
+            self.game_defaults[game["name"]] = game["defaults"]
+        self.game_dropdown.addItems(self.game_defaults.keys())
 
     def load_settings(self):
         if not self.settings_file.exists():
