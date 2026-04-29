@@ -328,6 +328,10 @@ class SyncApp(QMainWindow):
         source_row = QHBoxLayout()
         self.source_path = QLineEdit()
         source_row.addWidget(self.source_path)
+        source_browse_btn = QPushButton("Browse…")
+        source_browse_btn.setFixedWidth(90)
+        source_browse_btn.clicked.connect(lambda: self._browse_folder(self.source_path))
+        source_row.addWidget(source_browse_btn)
         self.source_default_btn = QPushButton("Default")
         self.source_default_btn.setFixedWidth(90)
         self.source_default_btn.clicked.connect(self._set_default_source_path)
@@ -721,6 +725,10 @@ class SyncApp(QMainWindow):
         dest_row = QHBoxLayout()
         self.dest_path = QLineEdit()
         dest_row.addWidget(self.dest_path)
+        self.dest_browse_btn = QPushButton("Browse…")
+        self.dest_browse_btn.setFixedWidth(90)
+        self.dest_browse_btn.clicked.connect(lambda: self._browse_folder(self.dest_path))
+        dest_row.addWidget(self.dest_browse_btn)
         self.dest_default_btn = QPushButton("Default")
         self.dest_default_btn.setFixedWidth(90)
         self.dest_default_btn.clicked.connect(self._set_default_dest_path)
@@ -728,6 +736,7 @@ class SyncApp(QMainWindow):
         content_layout.addLayout(dest_row)
         self.dest_label.setVisible(False)
         self.dest_path.setVisible(False)
+        self.dest_browse_btn.setVisible(False)
         self.dest_default_btn.setVisible(False)
 
         self.sync_direction_label = QLabel("Sync Direction:")
@@ -1049,6 +1058,7 @@ class SyncApp(QMainWindow):
         self.dest_label.setVisible(not cloud_on and dest_selected)
         self.dest_path.setVisible(not cloud_on and dest_selected)
         self.dest_default_btn.setVisible(not cloud_on and dest_selected)
+        self.dest_browse_btn.setVisible(not cloud_on and dest_selected)
         if cloud_on:
             self._refresh_cloud_folder_default()
         self.save_settings()
@@ -1125,6 +1135,33 @@ class SyncApp(QMainWindow):
         default_path = self._default_game_path("dest")
         if default_path:
             self.dest_path.setText(default_path)
+            self.save_settings()
+
+    def _browse_folder(self, target_input: QLineEdit):
+        """Open a cross-platform folder picker and write the selection to a line edit."""
+        current_text = target_input.text().strip()
+        start_dir = Path.home()
+
+        if current_text:
+            try:
+                expanded = Path(
+                    current_text
+                    .replace("%USERPROFILE%", str(Path.home()))
+                    .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+                ).expanduser()
+                candidate = expanded if expanded.is_dir() else expanded.parent
+                if candidate.exists():
+                    start_dir = candidate
+            except Exception:
+                pass
+
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder",
+            str(start_dir),
+        )
+        if selected_dir:
+            target_input.setText(selected_dir)
             self.save_settings()
 
     # ── Destination machine SSH helpers ───────────────────────────────────────
@@ -2110,6 +2147,7 @@ class SyncApp(QMainWindow):
             self.dest_label.setVisible(False)
             self.dest_path.setVisible(False)
             self.dest_default_btn.setVisible(False)
+            self.dest_browse_btn.setVisible(False)
             self._update_scan_button_label()
             return
 
@@ -2142,6 +2180,7 @@ class SyncApp(QMainWindow):
         self.dest_label.setVisible(not cloud_on)
         self.dest_path.setVisible(not cloud_on)
         self.dest_default_btn.setVisible(not cloud_on)
+        self.dest_browse_btn.setVisible(not cloud_on)
 
         saved_creds = self.previous_paths.get("dest_machine_creds", {}).get(
             dest_mac, {}
