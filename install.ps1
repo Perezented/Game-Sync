@@ -351,11 +351,114 @@ function Post-Install {
     Read-Host "  Press Enter to exit"
 }
 
-# ── SSH-only mode (called from self-elevation for SSH setup) ──────────────────
-param([switch]$SSHOnly)
+# ── Uninstall ─────────────────────────────────────────────────────────────────
+function Uninstall-GameSync {
+    Clear-Host
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Red
+    Write-Host "  ║       Game Sync  Uninstaller        ║" -ForegroundColor Red
+    Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Red
+    Write-Host ""
+
+    # Search common install locations
+    $candidates = @(
+        (Join-Path $env:LOCALAPPDATA "GameSync\game-sync.exe"),
+        (Join-Path $env:PROGRAMFILES "GameSync\game-sync.exe"),
+        (Join-Path ([Environment]::GetFolderPath("Desktop")) "game-sync.exe")
+    )
+    $foundPath = $null
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $foundPath = $c; break }
+    }
+
+    if (-not $foundPath) {
+        Write-Warn "Game Sync not found in any standard location."
+        Ask "Enter the full path to game-sync.exe (or press Enter to skip):"
+        $custom = (Read-Host "  Path").Trim()
+        if ($custom -ne "" -and (Test-Path $custom)) { $foundPath = $custom }
+    }
+
+    if ($foundPath) {
+        Write-Info "Found binary: $foundPath"
+        $removeBin = Prompt-YesNo "Remove it?" $true
+        if ($removeBin) {
+            # Remove binary and .bak
+            Remove-Item $foundPath -Force -ErrorAction SilentlyContinue
+            Remove-Item "$foundPath.bak" -Force -ErrorAction SilentlyContinue
+            Write-Ok "Removed: $foundPath"
+            # Remove rclone.exe in same folder if present
+            $rcloneInDir = Join-Path (Split-Path $foundPath) "rclone.exe"
+            if (Test-Path $rcloneInDir) {
+                $removeRclone = Prompt-YesNo "Also remove rclone.exe from the same folder?" $false
+                if ($removeRclone) {
+                    Remove-Item $rcloneInDir -Force
+                    Write-Ok "Removed: $rcloneInDir"
+                }
+            }
+            # Remove install dir if empty
+            $dir = Split-Path $foundPath
+            if ((Test-Path $dir) -and ((Get-ChildItem $dir -Force | Measure-Object).Count -eq 0)) {
+                Remove-Item $dir -Force
+                Write-Info "Removed empty directory: $dir"
+            }
+        }
+    } else {
+        Write-Warn "No binary found — skipping binary removal."
+    }
+
+    # Remove Start Menu shortcut
+    $startMenuLnk = Join-Path $ShortcutDir "Game Sync.lnk"
+    if (Test-Path $startMenuLnk) {
+        $removeStart = Prompt-YesNo "Remove Start Menu shortcut?" $true
+        if ($removeStart) { Remove-Item $startMenuLnk -Force; Write-Ok "Removed: $startMenuLnk" }
+    } else { Write-Info "No Start Menu shortcut found." }
+
+    # Remove Desktop shortcut
+    $desktopLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Game Sync.lnk"
+    if (Test-Path $desktopLnk) {
+        $removeDesk = Prompt-YesNo "Remove Desktop shortcut?" $true
+        if ($removeDesk) { Remove-Item $desktopLnk -Force; Write-Ok "Removed: $desktopLnk" }
+    } else { Write-Info "No Desktop shortcut found." }
+
+    # Remove settings file
+    $settings = Join-Path $env:APPDATA "game_sync_settings.json"
+    if (Test-Path $settings) {
+        $removeSettings = Prompt-YesNo "Remove saved settings ($settings)?" $false
+        if ($removeSettings) { Remove-Item $settings -Force; Write-Ok "Removed: $settings" }
+        else { Write-Info "Settings kept at $settings" }
+    }
+
+    # Remove from user PATH
+    if ($foundPath) {
+        $installDir = Split-Path $foundPath
+        $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($currentPath -like "*$installDir*") {
+            $removePath = Prompt-YesNo "Remove $installDir from user PATH?" $true
+            if ($removePath) {
+                $newPath = ($currentPath -split ';' | Where-Object { $_ -ne $installDir }) -join ';'
+                [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+                Write-Ok "Removed $installDir from user PATH"
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host "  Game Sync uninstalled." -ForegroundColor Green
+    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host ""
+    Read-Host "  Press Enter to exit"
+}
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+param([switch]$SSHOnly, [switch]$Uninstall)
 if ($SSHOnly) {
     Enable-SshServer
     Read-Host "Press Enter to exit"
+    exit 0
+}
+if ($Uninstall) {
+    Uninstall-GameSync
     exit 0
 }
 

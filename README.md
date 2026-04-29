@@ -89,6 +89,51 @@ The script will:
 
 ---
 
+## Uninstalling
+
+### Linux / Steam Deck
+
+Run the installer script with the `--uninstall` flag:
+
+```bash
+bash install.sh --uninstall
+```
+
+Or manually:
+
+```bash
+# Remove binary (Steam Deck default location)
+rm -f ~/Applications/game-sync ~/Applications/game-sync.bak
+
+# Remove binary (Linux default location)
+rm -f ~/.local/bin/game-sync ~/.local/bin/game-sync.bak
+
+# Remove desktop launcher
+rm -f ~/.local/share/applications/game-sync.desktop
+
+# Remove saved settings (optional — contains your sync paths and preferences)
+rm -f ~/game_sync_settings.json
+```
+
+### Windows
+
+Run the installer script with the `-Uninstall` flag:
+
+```powershell
+.\install.ps1 -Uninstall
+```
+
+Or manually:
+
+1. Delete `%LOCALAPPDATA%\GameSync\` (or wherever you installed it)
+2. Delete shortcuts:
+   - Start Menu: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Game Sync.lnk`
+   - Desktop: `%USERPROFILE%\Desktop\Game Sync.lnk`
+3. Remove from PATH: **Settings → System → About → Advanced system settings → Environment Variables** → edit `Path` under *User variables* and remove the GameSync entry
+4. Delete saved settings (optional): `%APPDATA%\game_sync_settings.json`
+
+---
+
 ## Windows (Desktop App)
 
 1. Download `game-sync.exe` from the [Releases page](https://github.com/Perezented/Game-Sync/releases).

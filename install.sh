@@ -439,4 +439,111 @@ goto_post_install() {
     fi
 }
 
-main "$@"
+# ── Uninstall ─────────────────────────────────────────────────────────────────
+uninstall() {
+    clear
+    echo -e "${BOLD}${RED}"
+    echo "  ╔══════════════════════════════════════╗"
+    echo "  ║       Game Sync  Uninstaller        ║"
+    echo "  ╚══════════════════════════════════════╝"
+    echo -e "${RESET}"
+
+    detect_os
+    local default_dir
+    default_dir="$(default_install_dir)"
+
+    # Find all likely binary locations
+    local candidates=(
+        "${default_dir}/${BINARY_NAME}"
+        "$HOME/.local/bin/${BINARY_NAME}"
+        "$HOME/Applications/${BINARY_NAME}"
+    )
+    local found_path=""
+    for c in "${candidates[@]}"; do
+        if [[ -f "$c" ]]; then
+            found_path="$c"
+            break
+        fi
+    done
+
+    if [[ -z "$found_path" ]]; then
+        warn "Game Sync binary not found in any standard location."
+        ask "Enter the full path to the game-sync binary (or press Enter to skip):"
+        read -rp "Path: " custom_path
+        if [[ -n "$custom_path" && -f "$custom_path" ]]; then
+            found_path="$custom_path"
+        fi
+    fi
+
+    if [[ -n "$found_path" ]]; then
+        info "Found binary: $found_path"
+        ask "Remove it?"
+        read -rp "Choice [Y/n, default Y]: " remove_bin
+        if [[ "${remove_bin:-Y,,}" != "n" ]]; then
+            rm -f "$found_path"
+            # Also remove .bak if present
+            rm -f "${found_path}.bak"
+            success "Removed: $found_path"
+            # Remove install dir if now empty
+            local dir
+            dir="$(dirname "$found_path")"
+            if [[ -d "$dir" ]] && [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+                rmdir "$dir" && info "Removed empty directory: $dir"
+            fi
+        fi
+    else
+        warn "No binary found — skipping binary removal."
+    fi
+
+    # Remove desktop launcher
+    if [[ -f "$DESKTOP_FILE" ]]; then
+        ask "Remove desktop launcher ($DESKTOP_FILE)?"
+        read -rp "Choice [Y/n, default Y]: " remove_desktop
+        if [[ "${remove_desktop:-Y,,}" != "n" ]]; then
+            rm -f "$DESKTOP_FILE"
+            command -v update-desktop-database &>/dev/null \
+                && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+            success "Removed: $DESKTOP_FILE"
+        fi
+    else
+        info "No desktop launcher found — skipping."
+    fi
+
+    # Remove settings file
+    local settings="$HOME/game_sync_settings.json"
+    if [[ -f "$settings" ]]; then
+        ask "Remove saved settings ($settings)?"
+        read -rp "Choice [y/N, default N]: " remove_settings
+        if [[ "${remove_settings,,}" == "y" ]]; then
+            rm -f "$settings"
+            success "Removed: $settings"
+        else
+            info "Settings kept at $settings"
+        fi
+    fi
+
+    # Offer to clean up PATH entry in .bashrc
+    local install_dir
+    install_dir="$(dirname "${found_path:-/nonexistent}")"
+    if [[ -f "$HOME/.bashrc" ]] && grep -q "$install_dir" "$HOME/.bashrc" 2>/dev/null; then
+        ask "Remove PATH entry for $install_dir from ~/.bashrc?"
+        read -rp "Choice [Y/n, default Y]: " remove_path
+        if [[ "${remove_path:-Y,,}" != "n" ]]; then
+            sed -i "\|${install_dir}|d" "$HOME/.bashrc"
+            success "Removed PATH entry from ~/.bashrc"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BOLD}${GREEN}════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}  Game Sync uninstalled.${RESET}"
+    echo -e "${BOLD}${GREEN}════════════════════════════════════════${RESET}"
+    echo ""
+}
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--uninstall" ]]; then
+    uninstall
+else
+    main "$@"
+fi
