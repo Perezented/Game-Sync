@@ -130,15 +130,27 @@ class NetworkScanner(QThread):
 
     def _get_mac_for_ip(self, ip):
         try:
-            result = subprocess.run(
-                ["ip", "neigh", "show", ip],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            parts = result.stdout.strip().split()
-            if "lladdr" in parts:
-                return parts[parts.index("lladdr") + 1].lower()
+            if platform.system() == "Windows":
+                result = subprocess.run(
+                    ["arp", "-a", ip],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if parts and parts[0] == ip and len(parts) >= 2:
+                        return parts[1].replace("-", ":").lower()
+            else:
+                result = subprocess.run(
+                    ["ip", "neigh", "show", ip],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                parts = result.stdout.strip().split()
+                if "lladdr" in parts:
+                    return parts[parts.index("lladdr") + 1].lower()
         except Exception:
             pass
         return ""
@@ -410,7 +422,7 @@ class LocalNetworkSync:
         return opts
 
     def _has_sshpass(self) -> bool:
-        return subprocess.run(["which", "sshpass"], capture_output=True).returncode == 0
+        return shutil.which("sshpass") is not None
 
     def _with_password(self, cmd: list[str]) -> list[str]:
         if self.ssh_password:
@@ -625,7 +637,7 @@ class LocalNetworkSync:
 
         # Key-based auth: rsync preferred, scp fallback
         dest = self._remote_addr(cloud_folder)
-        rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        rsync = shutil.which("rsync") is not None
         if rsync:
             ssh_cmd = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
             cmd = [
@@ -665,7 +677,7 @@ class LocalNetworkSync:
         # Key-based auth: rsync preferred, scp fallback
         lp.mkdir(parents=True, exist_ok=True)
         src = self._remote_addr(cloud_folder)
-        rsync = subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
+        rsync = shutil.which("rsync") is not None
         if rsync:
             ssh_cmd = "ssh " + " ".join(self._ssh_opts(batch_mode=True))
             cmd = ["rsync", "-az", "-e", ssh_cmd, src + "/", str(lp)]
@@ -739,9 +751,7 @@ class LocalNetworkSync:
                 f"Local source path does not exist: {lp}\n"
                 f"Check the Source Path field in the UI."
             )
-        has_rsync = (
-            subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
-        )
+        has_rsync = shutil.which("rsync") is not None
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
@@ -804,9 +814,7 @@ class LocalNetworkSync:
             .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
         ).expanduser().resolve()
         _log(f"[pull] remote={remote_path}  local={lp}")
-        has_rsync = (
-            subprocess.run(["which", "rsync"], capture_output=True).returncode == 0
-        )
+        has_rsync = shutil.which("rsync") is not None
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
                 raise RuntimeError("paramiko is required. Run: pip install paramiko")
@@ -1071,7 +1079,32 @@ class SyncApp(QMainWindow):
         local_ips = set()
         local_macs = set()
 
-        if platform.system() != "Windows":
+        if platform.system() == "Windows":
+            try:
+                result = subprocess.run(
+                    ["ipconfig", "/all"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                current_mac = ""
+                for line in result.stdout.splitlines():
+                    ls = line.strip()
+                    if "Physical Address" in ls:
+                        # e.g. "Physical Address. . . . . . . . . : AA-BB-CC-DD-EE-FF"
+                        mac_part = ls.split(":", 1)[-1].strip()
+                        current_mac = mac_part.replace("-", ":").lower()
+                    elif "IPv4 Address" in ls:
+                        # e.g. "IPv4 Address. . . . . . . . . . . : 192.168.1.5(Preferred)"
+                        ip_part = ls.split(":", 1)[-1].strip().replace("(Preferred)", "").strip()
+                        if ip_part and ip_part not in local_ips:
+                            interfaces.append({"iface": "local", "ip": ip_part, "mac": current_mac})
+                            local_ips.add(ip_part)
+                            if current_mac:
+                                local_macs.add(current_mac)
+            except Exception:
+                pass
+        else:
             try:
                 result = subprocess.run(
                     ["ip", "-o", "-4", "addr", "show", "up", "scope", "global"],
@@ -1575,7 +1608,7 @@ class SyncApp(QMainWindow):
         dest_ssh_layout.addWidget(self.dest_ssh_progress)
 
         content_layout.addWidget(self.dest_ssh_section)
-        
+
         # ── Separator block shown only when cloud storage is disabled ─────────
         self.direct_only_top_spacer = QWidget()
         self.direct_only_top_spacer.setFixedHeight(10)
@@ -1702,10 +1735,10 @@ class SyncApp(QMainWindow):
         self.warning_label.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         )
-        
+
         content_layout.addWidget(self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
         self.warning_label.setVisible(False)  # only show when sync starts
-        
+
         # ── Progress Bar ──────────────────────────────────────────────────────
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -1851,7 +1884,7 @@ class SyncApp(QMainWindow):
         settings_scroll.setWidget(settings_inner)
         settings_outer.addWidget(settings_scroll)
         footer_tabs.addTab(settings_tab, "⚙  Settings")
-        
+
         # ── Tab 3: About ──────────────────────────────────────────────────────
         about_tab = QWidget()
         about_tab.setStyleSheet("background-color: #2a2a2a;")
