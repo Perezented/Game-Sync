@@ -347,9 +347,11 @@ class SyncApp(QMainWindow):
         self.dest_path.editingFinished.connect(self.save_settings)
         self.cloud_folder_input.editingFinished.connect(self.save_settings)
 
-        self.scan_active = False
+        # Only reset scan flags if no scan was already triggered during load_settings
+        # (e.g. cloud provider = Local Network Machine fires on_cloud_provider_changed).
+        if not self.scan_active:
+            self.scan_performed = False
         self.sync_active = False
-        self.scan_performed = False
         self._loading = False
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(60_000)
@@ -1443,6 +1445,7 @@ class SyncApp(QMainWindow):
             btn_id == 3
             and self.lm_host_dropdown.count() <= 1
             and not getattr(self, "scan_active", False)
+            and not getattr(self, "_loading", False)
         ):
             self.start_network_scan()
         self._refresh_local_machine_scan_state()
@@ -2451,6 +2454,16 @@ class SyncApp(QMainWindow):
         if not self.settings_auto_scan_cb.isChecked():
             return False
         if self._current_dest_mac:
+            return False
+        # Don't start a second scan if one is already running (e.g. triggered during
+        # load_settings by the Local Network Machine cloud provider)
+        if self.scan_active:
+            return False
+        # When cloud mode is on but the provider is NOT Local Network Machine, the
+        # dest_machine_widget is hidden so scan results are invisible to the user.
+        cloud_on = getattr(self, "cloud_enabled_checkbox", None) and self.cloud_enabled_checkbox.isChecked()
+        provider_id = self.cloud_provider_group.checkedId() if getattr(self, "cloud_provider_group", None) else -1
+        if cloud_on and provider_id != 3:
             return False
         if self.scan_dropdown.count() <= 1 and not self.scan_performed:
             return True
