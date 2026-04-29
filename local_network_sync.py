@@ -204,10 +204,10 @@ class LocalNetworkSync:
                 pass
             if skip:
                 if on_line:
-                    on_line(f"  skipping {local.name} (destination is newer or same)")
+                    on_line(f"  skipping {dest} (destination is newer or same)")
             else:
                 if on_line:
-                    on_line(f"  sending {local.name}")
+                    on_line(f"  sending {dest}")
                 sftp.put(str(local), dest)
         else:
             for item in local.iterdir():
@@ -230,11 +230,11 @@ class LocalNetworkSync:
                     if skip:
                         if on_line:
                             on_line(
-                                f"  skipping {item.name} (destination is newer or same)"
+                                f"  skipping {r_sub} (destination is newer or same)"
                             )
                     else:
                         if on_line:
-                            on_line(f"  sending {item.name}")
+                            on_line(f"  sending {r_sub}")
                         sftp.put(str(item), r_sub)
 
     def _sftp_get_recursive(
