@@ -1,9 +1,13 @@
 import os
+import platform
 import subprocess
 import shutil
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+# Suppress console-window flicker when running as a Windows EXE
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 try:
     import paramiko
@@ -123,6 +127,7 @@ class LocalNetworkSync:
                 timeout=8,
                 stdin=subprocess.DEVNULL,
                 env=env,
+                creationflags=_CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 return True, "Connection successful."
@@ -302,7 +307,7 @@ class LocalNetworkSync:
             ]
         else:
             cmd = ["scp"] + self._ssh_opts(batch_mode=True) + ["-r", str(lp), dest]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or f"Transfer failed (exit {result.returncode})"
@@ -334,7 +339,7 @@ class LocalNetworkSync:
             cmd = ["rsync", "-az", "-e", ssh_cmd, src + "/", str(lp)]
         else:
             cmd = ["scp"] + self._ssh_opts(batch_mode=True) + ["-r", src, str(lp)]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=_CREATE_NO_WINDOW)
         if result.returncode != 0:
             raise RuntimeError(
                 result.stderr.strip() or f"Transfer failed (exit {result.returncode})"
@@ -433,6 +438,7 @@ class LocalNetworkSync:
             stderr=subprocess.STDOUT,
             text=True,
             stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
         )
         if on_proc:
             on_proc(proc)
@@ -506,6 +512,7 @@ class LocalNetworkSync:
             stderr=subprocess.STDOUT,
             text=True,
             stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_NO_WINDOW,
         )
         if on_proc:
             on_proc(proc)

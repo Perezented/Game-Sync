@@ -4,8 +4,18 @@ import platform
 import shutil
 import socket
 import subprocess
+import sys
 import webbrowser
 from pathlib import Path
+
+# Suppress console-window flicker when running as a Windows EXE
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def resource_path(relative: str) -> str:
+    """Return absolute path to a bundled resource, works for PyInstaller EXE and dev."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative)
 
 try:
     import keyring
@@ -15,7 +25,7 @@ except ImportError:
     KEYRING_AVAILABLE = False
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtGui import QColor, QIcon, QPalette
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -60,6 +70,7 @@ class SyncApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Game Sync Tool")
+        self.setWindowIcon(QIcon(resource_path("app_icon.png")))
         self.setGeometry(200, 200, 1000, 700)
 
         self.settings_file = self.get_settings_file_path()
@@ -244,6 +255,7 @@ class SyncApp(QMainWindow):
                     capture_output=True,
                     text=True,
                     check=False,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
                 current_mac = ""
                 for line in result.stdout.splitlines():
@@ -1525,6 +1537,7 @@ class SyncApp(QMainWindow):
                             ],
                             capture_output=True,
                             text=True,
+                            creationflags=_CREATE_NO_WINDOW,
                         )
                     else:
                         subprocess.run(
@@ -1546,6 +1559,7 @@ class SyncApp(QMainWindow):
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
                 output = result.stdout + result.stderr
                 if "---" + ">" in output and "<---End paste" in output:

@@ -6,6 +6,9 @@ import platform
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+# Suppress console-window flicker when running as a Windows EXE
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 class NetworkScanner(QThread):
     """Scans the local /24 subnet for live hosts and guesses their OS."""
@@ -86,6 +89,7 @@ class NetworkScanner(QThread):
                     capture_output=True,
                     text=True,
                     check=False,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
                 for line in result.stdout.splitlines():
                     parts = line.split()
