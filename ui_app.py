@@ -207,6 +207,7 @@ class _CustomGameDialog(QDialog):
         win_browse = QPushButton("Browse…")
         win_browse.setFixedWidth(80)
         win_browse.clicked.connect(lambda: self._browse(self.windows_edit))
+        win_browse.setVisible(platform.system() == "Windows")
         win_row.addWidget(win_browse)
         layout.addLayout(win_row)
 
@@ -220,6 +221,7 @@ class _CustomGameDialog(QDialog):
         lin_browse = QPushButton("Browse…")
         lin_browse.setFixedWidth(80)
         lin_browse.clicked.connect(lambda: self._browse(self.linux_edit))
+        lin_browse.setVisible(platform.system() != "Windows")
         lin_row.addWidget(lin_browse)
         layout.addLayout(lin_row)
 
@@ -328,7 +330,7 @@ class SyncApp(QMainWindow):
         self.rclone_gdrive: RcloneSync | None = None
         self.rclone_dropbox: RcloneSync | None = None
         self.local_network_sync: LocalNetworkSync | None = None
-        self.lm_password: str = ""
+        # lm_password is now read directly from self.lm_pass_input
         self.cloud_worker: CloudWorkerThread | None = None
 
         self.load_settings()
@@ -875,6 +877,27 @@ class SyncApp(QMainWindow):
         lm_key_row.addWidget(lm_browse_key_btn)
         lm_layout.addLayout(lm_key_row)
 
+        lm_pass_row = QHBoxLayout()
+        lm_pass_label = QLabel("Password:")
+        lm_pass_label.setFixedWidth(80)
+        lm_pass_row.addWidget(lm_pass_label)
+        self.lm_pass_input = QLineEdit()
+        self.lm_pass_input.setPlaceholderText("(optional) SSH password")
+        self.lm_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        lm_pass_row.addWidget(self.lm_pass_input)
+        self.lm_pass_eye_btn = QPushButton("🙈")
+        self.lm_pass_eye_btn.setFixedWidth(32)
+        self.lm_pass_eye_btn.setCheckable(True)
+        self.lm_pass_eye_btn.setToolTip("Show / hide password")
+        def _toggle_lm_pass(checked: bool):
+            self.lm_pass_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+            self.lm_pass_eye_btn.setText("👁" if checked else "🙈")
+        self.lm_pass_eye_btn.toggled.connect(_toggle_lm_pass)
+        lm_pass_row.addWidget(self.lm_pass_eye_btn)
+        lm_layout.addLayout(lm_pass_row)
+
         lm_port_test_row = QHBoxLayout()
         lm_port_label = QLabel("SSH port:")
         lm_port_label.setFixedWidth(80)
@@ -883,10 +906,6 @@ class SyncApp(QMainWindow):
         self.lm_port_input.setFixedWidth(50)
         lm_port_test_row.addWidget(self.lm_port_input)
         lm_port_test_row.addSpacing(10)
-        self.lm_pass_btn = QPushButton("Set Password")
-        self.lm_pass_btn.setFixedWidth(110)
-        self.lm_pass_btn.clicked.connect(self._set_lm_password)
-        lm_port_test_row.addWidget(self.lm_pass_btn)
         self.lm_test_btn = QPushButton("Test Connection")
         self.lm_test_btn.setFixedWidth(130)
         self.lm_test_btn.clicked.connect(self._test_local_machine_connection)
@@ -990,6 +1009,27 @@ class SyncApp(QMainWindow):
         dest_ssh_key_row.addWidget(dest_ssh_browse_btn)
         dest_ssh_layout.addLayout(dest_ssh_key_row)
 
+        dest_ssh_pass_row = QHBoxLayout()
+        dest_ssh_pass_label = QLabel("Password:")
+        dest_ssh_pass_label.setFixedWidth(80)
+        dest_ssh_pass_row.addWidget(dest_ssh_pass_label)
+        self.dest_ssh_pass_input = QLineEdit()
+        self.dest_ssh_pass_input.setPlaceholderText("(optional) SSH password")
+        self.dest_ssh_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        dest_ssh_pass_row.addWidget(self.dest_ssh_pass_input)
+        self.dest_ssh_pass_eye_btn = QPushButton("🙈")
+        self.dest_ssh_pass_eye_btn.setFixedWidth(32)
+        self.dest_ssh_pass_eye_btn.setCheckable(True)
+        self.dest_ssh_pass_eye_btn.setToolTip("Show / hide password")
+        def _toggle_dest_pass(checked: bool):
+            self.dest_ssh_pass_input.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+            self.dest_ssh_pass_eye_btn.setText("👁" if checked else "🙈")
+        self.dest_ssh_pass_eye_btn.toggled.connect(_toggle_dest_pass)
+        dest_ssh_pass_row.addWidget(self.dest_ssh_pass_eye_btn)
+        dest_ssh_layout.addLayout(dest_ssh_pass_row)
+
         dest_ssh_port_row = QHBoxLayout()
         dest_ssh_port_label = QLabel("SSH Port:")
         dest_ssh_port_label.setFixedWidth(80)
@@ -998,10 +1038,6 @@ class SyncApp(QMainWindow):
         self.dest_ssh_port_input.setFixedWidth(50)
         dest_ssh_port_row.addWidget(self.dest_ssh_port_input)
         dest_ssh_port_row.addSpacing(10)
-        self.dest_ssh_pass_btn = QPushButton("Set Password")
-        self.dest_ssh_pass_btn.setFixedWidth(110)
-        self.dest_ssh_pass_btn.clicked.connect(self._set_dest_password)
-        dest_ssh_port_row.addWidget(self.dest_ssh_pass_btn)
         self.dest_ssh_test_btn = QPushButton("Test Connection")
         self.dest_ssh_test_btn.setFixedWidth(130)
         self.dest_ssh_test_btn.clicked.connect(self._test_dest_connection)
@@ -1570,28 +1606,12 @@ class SyncApp(QMainWindow):
             self.dest_ssh_key_input.setText(path)
 
     def _set_lm_password(self):
-        password, ok = QInputDialog.getText(
-            self,
-            "Local Machine SSH Password",
-            "Enter SSH password for the local network machine:",
-            QLineEdit.EchoMode.Password,
-        )
-        if ok and password:
-            self.lm_password = password
-            self.lm_pass_btn.setText("Password Set ✓")
-            self.lm_pass_btn.setStyleSheet("color: #7ed6a9;")
+        """Legacy stub — password is now entered inline via lm_pass_input."""
+        pass
 
     def _set_dest_password(self):
-        password, ok = QInputDialog.getText(
-            self,
-            "Destination SSH Password",
-            "Enter SSH password for the destination machine:",
-            QLineEdit.EchoMode.Password,
-        )
-        if ok and password:
-            self.dest_password = password
-            self.dest_ssh_pass_btn.setText("Password Set ✓")
-            self.dest_ssh_pass_btn.setStyleSheet("color: #7ed6a9;")
+        """Legacy stub — password is now entered inline via dest_ssh_pass_input."""
+        pass
 
     def _build_dest_sync(self) -> "LocalNetworkSync | None":
         """Build a LocalNetworkSync for the currently selected destination machine."""
@@ -1605,7 +1625,7 @@ class SyncApp(QMainWindow):
         except ValueError:
             port = 22
         key = self.dest_ssh_key_input.text().strip()
-        password = getattr(self, "dest_password", "")
+        password = self.dest_ssh_pass_input.text()
         return LocalNetworkSync(ip, usr, "/", port, key, password)
 
     def _test_dest_connection(self):
@@ -1622,10 +1642,9 @@ class SyncApp(QMainWindow):
             return
 
         if not sync_obj.ssh_key and not sync_obj.ssh_password:
-            password = self._set_dest_password()  # type: ignore[func-returns-value]
-            sync_obj = self._build_dest_sync()
-            if sync_obj is None:
-                return
+            self.dest_ssh_status_label.setText("Enter an SSH key or password above.")
+            self.dest_ssh_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            return
 
         self.dest_ssh_test_btn.setEnabled(False)
         self.dest_ssh_test_btn.setStyleSheet("")
@@ -1702,10 +1721,12 @@ class SyncApp(QMainWindow):
             return
 
         if not sync_obj.ssh_key and not sync_obj.ssh_password:
-            self._set_dest_password()
-            sync_obj = self._build_dest_sync()
-            if not getattr(self, "dest_password", ""):
-                return
+            self.direct_sync_status_label.setText(
+                "Enter an SSH key or password in the Destination SSH Credentials section."
+            )
+            self.direct_sync_status_label.setStyleSheet("font-size: 10px; color: orange;")
+            self.direct_sync_status_label.setVisible(True)
+            return
 
         local_path = src
         remote_path = dest
@@ -2336,7 +2357,7 @@ class SyncApp(QMainWindow):
             QLineEdit.EchoMode.Password,
         )
         if ok and password:
-            self.lm_password = password
+            self.lm_pass_input.setText(password)
             return password
         return None
 
@@ -2363,7 +2384,7 @@ class SyncApp(QMainWindow):
         if not ip or not username or not rpath:
             return False
 
-        password = getattr(self, "lm_password", "")
+        password = self.lm_pass_input.text()
         self.local_network_sync = LocalNetworkSync(
             ip, username, rpath, port, key, password
         )
@@ -2630,9 +2651,7 @@ class SyncApp(QMainWindow):
             self.dest_ssh_key_input.setText(saved_creds["ssh_key"])
         if saved_creds.get("port"):
             self.dest_ssh_port_input.setText(str(saved_creds["port"]))
-        self.dest_password = ""
-        self.dest_ssh_pass_btn.setText("Set Password")
-        self.dest_ssh_pass_btn.setStyleSheet("")
+        self.dest_ssh_pass_input.clear()
         self.dest_ssh_test_btn.setStyleSheet("")
         self.dest_ssh_user_input.setStyleSheet("")
         self.dest_ssh_status_label.setText("Not tested")
