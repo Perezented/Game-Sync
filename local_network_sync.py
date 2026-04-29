@@ -271,6 +271,10 @@ class LocalNetworkSync:
                         # Show the remote path relative to the remote base for clarity
                         on_line(f"  receiving {r_path}")
                     sftp.get(r_path, str(l_path))
+                    # Preserve remote mtime so a subsequent push doesn't
+                    # treat the freshly-downloaded file as newer.
+                    if entry.st_mtime is not None:
+                        os.utime(str(l_path), (entry.st_mtime, entry.st_mtime))
 
     # ── public transfer methods ────────────────────────────────────────────────
 
