@@ -3202,19 +3202,6 @@ class SyncApp(QMainWindow):
                 )
                 self.lm_port_input.setText(self.previous_paths.get("lm_port", "22"))
                 self.lm_ssh_key_input.setText(self.previous_paths.get("lm_ssh_key", ""))
-                # ── Settings-tab mirror fields ──────────────────────────────────
-                self.st_lm_username_input.setText(
-                    self.previous_paths.get("lm_username", "")
-                )
-                self.st_lm_remote_path_input.setText(
-                    self.previous_paths.get("lm_remote_path", "")
-                )
-                self.st_lm_port_input.setText(
-                    self.previous_paths.get("lm_port", "22")
-                )
-                self.st_lm_ssh_key_input.setText(
-                    self.previous_paths.get("lm_ssh_key", "")
-                )
                 if self.previous_paths.get("lm_ip") and self.previous_paths.get(
                     "lm_username"
                 ):
