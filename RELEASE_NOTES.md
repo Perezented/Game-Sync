@@ -1,5 +1,47 @@
 # Game Sync — Release Notes
 
+##  v1.1.0 — Changes since v1.0.0
+
+### Highlights
+
+- Added interactive installer and updater scripts for Windows, Linux, and Steam Deck
+- Added uninstall support for both installer flows
+- Added custom game and emulator templates directly in the app
+- Added folder browse buttons and inline SSH password fields with show/hide toggles
+- Added better cloud sync checks, clearer errors, and improved transfer feedback
+
+### New in the app
+
+- You can now add your own game entries from the UI instead of relying only on built-in defaults
+- Added emulator templates for common setups such as RetroArch, Dolphin, DuckStation, PCSX2, RPCS3, Yuzu, Citra, PPSSPP, mGBA, and EmuDeck-style layouts
+- Source folder selection now has a cross-platform folder picker to speed up setup
+- The app now shows a warning banner when `rclone` is missing, with a quick way to re-check availability
+- Windows builds now use an app icon and avoid extra console flicker during background operations
+
+### Sync and reliability improvements
+
+- Sync now skips files that are already up to date instead of copying everything again
+- Downloaded files preserve their modification times to reduce unnecessary follow-up syncs
+- Sync logging is more detailed for copied, skipped, uploaded, and downloaded files
+- Cloud sync has better runtime checks and more helpful error messages when `rclone` or auth is unavailable
+- Startup no longer triggers duplicate network scans while loading saved settings
+
+### Install and setup improvements
+
+- Windows installer now handles updates, Start Menu shortcuts, optional desktop shortcuts, optional OpenSSH setup, and optional `rclone` installation
+- Linux and Steam Deck installer now handles updates, desktop launcher creation, optional SSH enablement, and optional `rclone` installation
+- Uninstall flows were added with safer prompts and cleanup steps
+- PATH handling and custom install path handling were improved, including launcher support for paths with spaces
+- Steam Deck, Windows, and Linux setup instructions were expanded and clarified
+
+### Under the hood
+
+- Refactored the app from a monolithic script into dedicated modules for UI, cloud sync, LAN sync, and network scanning
+- Replaced the JSON game defaults file with an embedded Python module
+- Refreshed and reordered built-in game defaults
+
+---
+
 ## v1.0.0 — April 29, 2026
 
 ### What is Game Sync?
