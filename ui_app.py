@@ -7,6 +7,9 @@ import subprocess
 import webbrowser
 from pathlib import Path
 
+# Suppress console-window flicker when running as a Windows EXE
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 try:
     import keyring
     KEYRING_AVAILABLE = True
@@ -244,6 +247,7 @@ class SyncApp(QMainWindow):
                     capture_output=True,
                     text=True,
                     check=False,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
                 current_mac = ""
                 for line in result.stdout.splitlines():
@@ -1525,6 +1529,7 @@ class SyncApp(QMainWindow):
                             ],
                             capture_output=True,
                             text=True,
+                            creationflags=_CREATE_NO_WINDOW,
                         )
                     else:
                         subprocess.run(
@@ -1546,6 +1551,7 @@ class SyncApp(QMainWindow):
                     capture_output=True,
                     text=True,
                     timeout=300,
+                    creationflags=_CREATE_NO_WINDOW,
                 )
                 output = result.stdout + result.stderr
                 if "---" + ">" in output and "<---End paste" in output:

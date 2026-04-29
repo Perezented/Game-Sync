@@ -6,6 +6,9 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+# Suppress console-window flicker when running as a Windows EXE
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # ── rclone handles GDrive + Dropbox without developer accounts ───────────────
 # Install from https://rclone.org/install/
 
@@ -63,6 +66,7 @@ class RcloneSync:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=_CREATE_NO_WINDOW,
         )
         if on_proc:
             on_proc(proc)
