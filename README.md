@@ -18,7 +18,7 @@ A PyQt6 GUI utility for keeping game save files in sync across machines and plat
 - `game-sync.py` — PyQt6 GUI application
 - `sync_engine.py` — standalone path expansion and file copy logic
 - `config.json` — example sync entries
-- `game_defaults.json` — default save paths per game and platform
+- `game_defaults.py` — default save paths for supported games and platforms
 - `mock_data/` — example save folder structure for development and testing
 
 ## Requirements
@@ -76,7 +76,7 @@ python sync_engine.py "%USERPROFILE%\\Zomboid\\Saves" "~/Zomboid/Saves"
 
 ## Configuration
 
-- `game_defaults.json` — default save paths by game and platform (Windows, Linux, Steam Deck)
+- `game_defaults.py` — default save paths by game and platform (Windows, Linux, Steam Deck)
 - `~/game_sync_settings.json` — auto-generated at runtime; stores all user preferences, credentials, and per-machine paths
 
 ## License
