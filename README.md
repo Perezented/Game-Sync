@@ -30,6 +30,87 @@ A PyQt6 GUI utility for keeping game save files in sync across machines and plat
 - Star Wars Jedi: Fallen Order
 - Tale of Two Wastelands
 
+## Easy Install (No Coding Needed)
+
+Download the latest prebuilt binary from the [Releases page](https://github.com/Perezented/Game-Sync/releases) — no Python install required.
+
+### What to download
+
+- **Windows:** `game-sync.exe`
+- **Linux / Steam Deck:** `game-sync` (no file extension)
+
+---
+
+## Windows (Desktop App)
+
+1. Download `game-sync.exe` from the [Releases page](https://github.com/Perezented/Game-Sync/releases).
+2. Double-click `game-sync.exe`.
+3. If SmartScreen appears:
+    - Click **More info** → **Run anyway**.
+4. (Optional) Right-click `game-sync.exe` → **Send to → Desktop (create shortcut)**.
+
+That is it. No Python install required.
+
+---
+
+## Steam Deck (Desktop Mode App)
+
+1. Switch to **Desktop Mode**.
+2. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases) and move it to a permanent folder, for example:
+    - `~/Applications/game-sync`
+3. Make it executable (one-time):
+
+```bash
+chmod +x ~/Applications/game-sync
+```
+
+4. Create an app launcher file at `~/.local/share/applications/game-sync.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Game Sync App
+Exec=/home/deck/Applications/game-sync
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+```
+
+5. Open the Application Launcher and start **Game Sync App**.
+6. (Optional) In Steam Desktop client, add it as a non-Steam game for Game Mode.
+
+---
+
+## Linux Distros (Desktop App)
+
+1. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases) and move it to a folder, for example:
+    - `~/.local/bin/game-sync`
+2. Make it executable:
+
+```bash
+chmod +x ~/.local/bin/game-sync
+```
+
+3. Create `~/.local/share/applications/game-sync.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=Game Sync App
+Exec=/home/$USER/.local/bin/game-sync
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+```
+
+4. Refresh apps (or log out/in), then launch **Game Sync App** from your app menu.
+
+Optional terminal launch:
+
+```bash
+~/.local/bin/game-sync
+```
+
 ## Contents
 
 - `game-sync.py` — application entry point
