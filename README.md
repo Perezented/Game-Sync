@@ -15,7 +15,7 @@ A PyQt6 GUI utility for keeping game save files in sync across machines and plat
 
 ## Contents
 
-- `gui_app.py` — PyQt6 GUI application
+- `game-sync.py` — PyQt6 GUI application
 - `sync_engine.py` — standalone path expansion and file copy logic
 - `config.json` — example sync entries
 - `game_defaults.json` — default save paths per game and platform
@@ -57,7 +57,7 @@ sudo -v ; curl https://rclone.org/install.sh | sudo bash
 ## Running the App
 
 ```bash
-python gui_app.py
+python game-sync.py
 ```
 
 ## Sync Engine (CLI)
