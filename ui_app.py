@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cloud_sync import CloudWorkerThread, RCLONE_AVAILABLE, RcloneSync
+from cloud_sync import CloudWorkerThread, RcloneSync, rclone_is_available
 from game_defaults import GAME_DEFAULTS
 from local_network_sync import (
     ConnectionTestThread,
@@ -1499,7 +1499,7 @@ class SyncApp(QMainWindow):
         )
         rclone_type = "drive" if provider == "gdrive" else "dropbox"
 
-        if not RCLONE_AVAILABLE:
+        if not rclone_is_available():
             status_label.setText("rclone not found — install from rclone.org")
             status_label.setStyleSheet("font-size: 10px; color: red;")
             return
@@ -1627,7 +1627,7 @@ class SyncApp(QMainWindow):
 
     def _refresh_rclone_banner(self):
         """Show the rclone-not-found banner only when relevant providers are selected."""
-        rclone_missing = not RCLONE_AVAILABLE
+        rclone_missing = not rclone_is_available()
         btn_id = self.cloud_provider_group.checkedId()
         needs_rclone = btn_id in (0, 1, 2)
         self.rclone_banner.setVisible(rclone_missing and needs_rclone)

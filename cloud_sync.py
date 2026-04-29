@@ -8,7 +8,13 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 # ── rclone handles GDrive + Dropbox without developer accounts ───────────────
 # Install from https://rclone.org/install/
-RCLONE_AVAILABLE = bool(shutil.which("rclone"))
+
+
+def rclone_is_available() -> bool:
+    return bool(shutil.which("rclone"))
+
+
+RCLONE_AVAILABLE = rclone_is_available()
 
 
 class RcloneSync:
@@ -76,7 +82,7 @@ class RcloneSync:
             raise RuntimeError(f"rclone exited with code {proc.returncode}")
 
     def _ensure_rclone_installed(self):
-        if not RCLONE_AVAILABLE:
+        if not rclone_is_available():
             raise RuntimeError(
                 "rclone is not installed. Install it from https://rclone.org/install/."
             )
