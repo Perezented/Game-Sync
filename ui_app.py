@@ -1726,9 +1726,9 @@ class SyncApp(QMainWindow):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
-        local_path = self.dest_path.text().strip() or self.source_path.text().strip()
+        local_path = self.source_path.text().strip()
         if not local_path:
-            self.cloud_op_status_label.setText("Set a Destination Path first.")
+            self.cloud_op_status_label.setText("Set a Source Path first.")
             return
         cloud_syncs = self._active_cloud_sync_objects()
         if not cloud_syncs:
@@ -1798,15 +1798,20 @@ class SyncApp(QMainWindow):
     ):
         cancelled = getattr(self, "_cloud_cancelled", False)
         if not ok or cancelled:
-            label = (
-                "Cancelled."
-                if cancelled or msg == "Cancelled."
-                else f"Error: {msg[:80]}"
-            )
-            color = "orange" if cancelled or msg == "Cancelled." else "red"
-            self._log_append(
-                ("✗ " if not ok else "⏹ ") + (msg if not cancelled else "Cancelled.")
-            )
+            if cancelled or msg == "Cancelled.":
+                label = "Cancelled."
+                color = "orange"
+                self._log_append("⏹ Cancelled.")
+            else:
+                label = self._friendly_cloud_error(msg)
+                color = "red"
+                self._log_append(f"✗ {msg}")
+                err_box = QMessageBox(self)
+                err_box.setWindowTitle("Cloud Sync Failed")
+                err_box.setIcon(QMessageBox.Icon.Warning)
+                err_box.setText(label)
+                err_box.setDetailedText(msg)
+                err_box.exec()
             self.cloud_op_status_label.setText(label)
             self.cloud_op_status_label.setStyleSheet(
                 f"font-size: 10px; color: {color};"
@@ -1833,6 +1838,27 @@ class SyncApp(QMainWindow):
             self.cloud_op_status_label.setText(f"✓ {msg}")
             self.cloud_op_status_label.setStyleSheet("font-size: 10px; color: #7ed6a9;")
             self._reset_cloud_buttons()
+
+    def _friendly_cloud_error(self, msg: str) -> str:
+        """Translate a raw rclone/sync error into a short, user-readable sentence."""
+        m = msg.lower()
+        if "directory not found" in m or "not found" in m:
+            return (
+                "Cloud folder not found — push your saves first before pulling, "
+                "or check that the Cloud Folder path matches what was uploaded."
+            )
+        if "invalid_grant" in m or "token has been expired" in m or "oauth" in m:
+            return "Cloud authorization expired — re-authorize in the Cloud Sync section."
+        if "permission denied" in m or "errno 13" in m:
+            return "Permission denied — check that the local save path is writable."
+        if "no space left" in m:
+            return "Not enough disk space to complete the download."
+        if "connection refused" in m or "network" in m or "dial tcp" in m:
+            return "Network error — check your internet connection and try again."
+        if "rclone exited with code" in m:
+            code = m.split("code")[-1].strip().split()[0]
+            return f"rclone failed (exit code {code}) — see the Sync Log for details."
+        return f"Sync failed — {msg[:120]}"
 
     def _cancel_cloud_sync(self):
         self._cloud_cancelled = True
