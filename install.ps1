@@ -304,9 +304,15 @@ function Post-Install {
             [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
                 [Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin) {
-            Write-Warn "Relaunching with administrator rights for SSH setup …"
-            $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -SSHOnly"
-            Start-Process powershell -Verb RunAs -ArgumentList $args -Wait
+            if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
+                Write-Warn "SSH setup requires administrator rights, but this installer was not started from a script file."
+                Write-Warn "When run via an inline command (for example, irm ... | iex), PowerShell cannot relaunch this installer with -SSHOnly."
+                Write-Warn "To enable OpenSSH Server, download this installer to a .ps1 file and run it as Administrator with -SSHOnly."
+            } else {
+                Write-Warn "Relaunching with administrator rights for SSH setup …"
+                $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -SSHOnly"
+                Start-Process powershell -Verb RunAs -ArgumentList $args -Wait
+            }
         } else {
             Enable-SshServer
         }
