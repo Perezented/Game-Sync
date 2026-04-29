@@ -203,7 +203,13 @@ class RcloneSync:
         self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None
     ):
         cfg = self._write_config()
-        local_path = str(Path(local_path).expanduser().resolve())
+        local_path = str(
+            Path(
+                str(local_path)
+                .replace("%USERPROFILE%", str(Path.home()))
+                .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+            ).expanduser().resolve()
+        )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         if on_line:
             on_line(f"[rclone upload] {local_path!r}  →  {remote!r}")
@@ -227,7 +233,13 @@ class RcloneSync:
         self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None
     ):
         cfg = self._write_config()
-        local_path = str(Path(local_path).expanduser().resolve())
+        local_path = str(
+            Path(
+                str(local_path)
+                .replace("%USERPROFILE%", str(Path.home()))
+                .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+            ).expanduser().resolve()
+        )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
         Path(local_path).mkdir(parents=True, exist_ok=True)
         if on_line:
@@ -716,7 +728,11 @@ class LocalNetworkSync:
             if on_line:
                 on_line(msg)
 
-        lp = Path(local_path).expanduser()
+        lp = Path(
+            str(local_path)
+            .replace("%USERPROFILE%", str(Path.home()))
+            .replace("%APPDATA%", str(Path.home() / "AppData" / "Roaming"))
+        ).expanduser().resolve()
         _log(f"[push] local={lp}  remote={remote_path}")
         if not lp.exists():
             raise FileNotFoundError(
