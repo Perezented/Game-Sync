@@ -55,61 +55,97 @@ That is it. No Python install required.
 
 ## Steam Deck (Desktop Mode App)
 
-1. Switch to **Desktop Mode**.
-2. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases) and move it to a permanent folder, for example:
-    - `~/Applications/game-sync`
-3. Make it executable (one-time):
+### Quick Install (recommended)
+
+Switch to **Desktop Mode**, open **Konsole**, and run this single command:
 
 ```bash
-chmod +x ~/Applications/game-sync
-```
-
-4. Create an app launcher file at `~/.local/share/applications/game-sync.desktop`:
-
-```ini
+curl -fsSL https://github.com/Perezented/Game-Sync/releases/latest/download/game-sync \
+  -o ~/Applications/game-sync \
+  --create-dirs \
+&& chmod +x ~/Applications/game-sync \
+&& mkdir -p ~/.local/share/applications \
+&& cat > ~/.local/share/applications/game-sync.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
-Name=Game Sync App
+Name=Game Sync
 Exec=/home/deck/Applications/game-sync
 Icon=utilities-terminal
 Terminal=false
 Categories=Utility;
+EOF
+&& echo "✓ Game Sync installed. Run: ~/Applications/game-sync"
 ```
 
-5. Open the Application Launcher and start **Game Sync App**.
-6. (Optional) In Steam Desktop client, add it as a non-Steam game for Game Mode.
+After it finishes, launch from **Konsole** (`~/Applications/game-sync`) or find **Game Sync** in the KDE app menu.
+
+### Add to Steam (Game Mode)
+
+1. In **Steam (Desktop Mode)** click **Games → Add a Non-Steam Game to My Library**
+2. Click **Browse**, navigate to `~/Applications/` and select `game-sync`
+3. Click **Add Selected Programs**
+
+### Manual Install
+
+1. Switch to **Desktop Mode** (hold the Power button → *Switch to Desktop*)
+2. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases)
+3. Open **Konsole** and run:
+
+```bash
+mkdir -p ~/Applications
+mv ~/Downloads/game-sync ~/Applications/game-sync
+chmod +x ~/Applications/game-sync
+```
+
+4. (Optional) Create a desktop launcher so it appears in the KDE app menu:
+
+```bash
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/game-sync.desktop << 'EOF'
+[Desktop Entry]
+Type=Application
+Name=Game Sync
+Exec=/home/deck/Applications/game-sync
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+EOF
+```
+
+5. Run it: `~/Applications/game-sync`
 
 ---
 
 ## Linux Distros (Desktop App)
 
-1. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases) and move it to a folder, for example:
-    - `~/.local/bin/game-sync`
-2. Make it executable:
+1. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases)
+2. Open a terminal in the folder where you saved it and make it executable:
 
 ```bash
-chmod +x ~/.local/bin/game-sync
+chmod +x game-sync
+./game-sync
 ```
 
-3. Create `~/.local/share/applications/game-sync.desktop`:
+Or double-click it in your file manager if it supports running executables.
 
-```ini
+(Optional) To install it system-wide and add an app menu entry:
+
+```bash
+mkdir -p ~/.local/bin
+mv game-sync ~/.local/bin/game-sync
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/game-sync.desktop << 'EOF'
 [Desktop Entry]
 Type=Application
-Name=Game Sync App
+Name=Game Sync
 Exec=/home/$USER/.local/bin/game-sync
 Icon=utilities-terminal
 Terminal=false
 Categories=Utility;
+EOF
 ```
 
-4. Refresh apps (or log out/in), then launch **Game Sync App** from your app menu.
-
-Optional terminal launch:
-
-```bash
-~/.local/bin/game-sync
-```
+Then launch **Game Sync** from your app menu or run `~/.local/bin/game-sync`.
 
 ## Contents
 
@@ -185,17 +221,9 @@ pip install -r requirements.txt
 python game-sync.py
 ```
 
-5. (Optional) To launch from Game Mode, create a non-Steam shortcut:
-   - In Steam Desktop Mode, go to **Add a Game → Add a Non-Steam Game**
-   - Point it to a launch script, e.g. `~/game-sync-launch.sh`:
-
-```bash
-#!/bin/bash
-source ~/game-sync-venv/bin/activate
-python ~/zomboid-sync-app/game-sync.py
-```
-
-Make it executable: `chmod +x ~/game-sync-launch.sh`
+5. (Optional) To launch from Game Mode:
+   - In Steam Desktop Mode, go to **Games → Add a Non-Steam Game to My Library**
+   - Click **Browse** and select your `game-sync.py` or create a small shell script that activates the venv and runs it
 
 ---
 
@@ -209,7 +237,7 @@ rclone is required for Google Drive and Dropbox cloud sync. The app uses rclone'
 sudo -v ; curl https://rclone.org/install.sh | sudo bash
 ```
 
-> **Steam Deck note:** The OS is read-only, so `sudo` writes to an overlay. rclone will be lost after a system update. Re-run the install command after SteamOS updates, or install rclone to `~/.local/bin` instead:
+> **Steam Deck:** Install rclone to your home directory so it survives SteamOS updates:
 >
 > ```bash
 > mkdir -p ~/.local/bin
@@ -217,12 +245,11 @@ sudo -v ; curl https://rclone.org/install.sh | sudo bash
 > unzip /tmp/rclone.zip -d /tmp/rclone-tmp
 > cp /tmp/rclone-tmp/rclone-*/rclone ~/.local/bin/rclone
 > chmod +x ~/.local/bin/rclone
+> echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+> source ~/.bashrc
 > ```
 >
-> Then add `~/.local/bin` to your PATH in `~/.bashrc`:
-> ```bash
-> export PATH="$HOME/.local/bin:$PATH"
-> ```
+> Installing via `sudo pacman -S rclone` also works but rclone will be removed after a SteamOS system update. The home-directory method above is more persistent.
 
 ### Windows
 
