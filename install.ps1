@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Game Sync — Installer / Updater for Windows
+    Game Sync - Installer / Updater for Windows
 .DESCRIPTION
     Downloads the latest Game Sync release from GitHub, installs it to the
     user's chosen location, creates a Start Menu shortcut, optionally installs
@@ -13,7 +13,7 @@ param([switch]$SSHOnly, [switch]$Uninstall)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# -- Config ------------------------------------------------------------------
 $Repo        = "Perezented/Game-Sync"
 $BinaryName  = "game-sync.exe"
 $GithubApi   = "https://api.github.com/repos/$Repo/releases/latest"
@@ -21,16 +21,21 @@ $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$BinaryName"
 $DefaultDir  = Join-Path $env:LOCALAPPDATA "GameSync"
 $ShortcutDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 
-# ── Colour helpers ────────────────────────────────────────────────────────────
-function Write-Header($msg) {
-    Write-Host "`n$('═' * 46)" -ForegroundColor Cyan
-    Write-Host "  $msg" -ForegroundColor Cyan
-    Write-Host "$('═' * 46)`n" -ForegroundColor Cyan
+function Get-InstalledVersionFile {
+    param([string]$InstallPath)
+    return "$InstallPath.version"
 }
-function Write-Info($msg)    { Write-Host "  ▸ $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)      { Write-Host "  ✓ $msg" -ForegroundColor Green }
-function Write-Warn($msg)    { Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
-function Write-Err($msg)     { Write-Host "  ✗ $msg" -ForegroundColor Red }
+
+# -- Color helpers ------------------------------------------------------------
+function Write-Header($msg) {
+    Write-Host "`n$('=' * 46)" -ForegroundColor Cyan
+    Write-Host "  $msg" -ForegroundColor Cyan
+    Write-Host "$('=' * 46)`n" -ForegroundColor Cyan
+}
+function Write-Info($msg)    { Write-Host "  [*] $msg" -ForegroundColor Cyan }
+function Write-Ok($msg)      { Write-Host "  [+] $msg" -ForegroundColor Green }
+function Write-Warn($msg)    { Write-Host "  [!] $msg" -ForegroundColor Yellow }
+function Write-Err($msg)     { Write-Host "  [x] $msg" -ForegroundColor Red }
 function Ask($msg)           { Write-Host "`n  $msg" -ForegroundColor Yellow }
 
 function Prompt-YesNo {
@@ -42,7 +47,7 @@ function Prompt-YesNo {
     return ($ans -eq "y" -or $ans -eq "yes")
 }
 
-# ── Fetch latest release version ──────────────────────────────────────────────
+# -- Version helpers ----------------------------------------------------------
 function Get-LatestVersion {
     try {
         $response = Invoke-RestMethod -Uri $GithubApi -UseBasicParsing -TimeoutSec 10
@@ -53,7 +58,26 @@ function Get-LatestVersion {
     }
 }
 
-# ── Download with progress ────────────────────────────────────────────────────
+function Normalize-VersionValue {
+    param(
+        [AllowNull()][string]$Version,
+        [string]$Fallback = "unknown"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $Fallback
+    }
+
+    return $Version.Trim()
+}
+
+function Test-KnownVersion {
+    param([string]$Version)
+
+    return (Normalize-VersionValue $Version).ToLowerInvariant() -ne "unknown"
+}
+
+# -- Download with progress ---------------------------------------------------
 function Download-File {
     param([string]$Url, [string]$Dest)
     Write-Info "Downloading: $Url"
@@ -69,7 +93,7 @@ function Download-File {
     if ($task.IsFaulted) { throw $task.Exception.InnerException }
 }
 
-# ── Create Start Menu shortcut ────────────────────────────────────────────────
+# -- Create Start Menu shortcut -----------------------------------------------
 function New-Shortcut {
     param([string]$TargetPath)
     $lnkPath = Join-Path $ShortcutDir "Game Sync.lnk"
@@ -83,7 +107,7 @@ function New-Shortcut {
     return $lnkPath
 }
 
-# ── Create Desktop shortcut ───────────────────────────────────────────────────
+# -- Create Desktop shortcut --------------------------------------------------
 function New-DesktopShortcut {
     param([string]$TargetPath)
     $lnkPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Game Sync.lnk"
@@ -96,7 +120,7 @@ function New-DesktopShortcut {
     Write-Ok "Desktop shortcut created: $lnkPath"
 }
 
-# ── Install rclone (Windows) ──────────────────────────────────────────────────
+# -- Install rclone (Windows) -------------------------------------------------
 function Install-Rclone {
     param([string]$InstallDir)
 
@@ -111,7 +135,7 @@ function Install-Rclone {
         return
     }
 
-    Write-Info "Downloading rclone …"
+    Write-Info "Downloading rclone ..."
     $zipUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
     $tmpZip = Join-Path $env:TEMP "rclone-installer.zip"
     $tmpDir = Join-Path $env:TEMP "rclone-tmp"
@@ -124,7 +148,7 @@ function Install-Rclone {
         if ($null -eq $rcloneExe) { throw "rclone.exe not found in archive." }
         Copy-Item $rcloneExe.FullName -Destination $rcloneDest -Force
         Write-Ok "rclone installed to: $rcloneDest"
-        Write-Warn "rclone is in $InstallDir — make sure that folder is on your system PATH."
+        Write-Warn "rclone is in $InstallDir - make sure that folder is on your system PATH."
         Write-Info "To add it: System Settings → 'Edit environment variables' → Path → Add $InstallDir"
     } finally {
         Remove-Item $tmpZip  -ErrorAction SilentlyContinue
@@ -132,7 +156,7 @@ function Install-Rclone {
     }
 }
 
-# ── Path helper functions ───────────────────────────────────────────────────
+# -- Path helper functions ---------------------------------------------------
 function Get-PathEntries {
     param([string]$PathValue)
     if ([string]::IsNullOrWhiteSpace($PathValue)) {
@@ -150,7 +174,7 @@ function PathContainsEntry {
     return $entries -contains $Entry
 }
 
-# ── Add folder to user PATH ───────────────────────────────────────────────────
+# -- Add folder to user PATH --------------------------------------------------
 function Add-ToUserPath {
     param([string]$Dir)
     $current = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -164,16 +188,16 @@ function Add-ToUserPath {
     }
 }
 
-# ── Enable OpenSSH Server ─────────────────────────────────────────────────────
+# -- Enable OpenSSH Server ----------------------------------------------------
 function Enable-SshServer {
-    Write-Info "Checking SSH Server …"
+    Write-Info "Checking SSH Server ..."
     $feature = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue
     if ($null -eq $feature) {
         Write-Warn "Could not query OpenSSH Server capability. Enable manually via Settings → Optional Features."
         return
     }
     if ($feature.State -ne "Installed") {
-        Write-Info "Installing OpenSSH Server feature …"
+        Write-Info "Installing OpenSSH Server feature ..."
         Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
         Write-Ok "OpenSSH Server installed."
     } else {
@@ -205,18 +229,18 @@ function Enable-SshServer {
     }
 }
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# -- Main ---------------------------------------------------------------------
 function Main {
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║        Game Sync  Installer          ║" -ForegroundColor Cyan
-    Write-Host "  ║   github.com/Perezented/Game-Sync    ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  +--------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  |        Game Sync  Installer          |" -ForegroundColor Cyan
+    Write-Host "  |   github.com/Perezented/Game-Sync    |" -ForegroundColor Cyan
+    Write-Host "  +--------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
 
-    # ── OS detection (Windows only, but show info) ─────────────────────────────
-    Write-Header "Step 1 — System Info"
+    # -- OS detection (Windows only, but show info) ----------------------------
+    Write-Header "Step 1 - System Info"
     $osInfo = Get-CimInstance Win32_OperatingSystem
     Write-Ok "Detected: $($osInfo.Caption) ($($osInfo.OSArchitecture))"
 
@@ -224,8 +248,8 @@ function Main {
         Write-Warn "32-bit Windows detected. The Game Sync binary is 64-bit and may not run."
     }
 
-    # ── Install location ───────────────────────────────────────────────────────
-    Write-Header "Step 2 — Install Location"
+    # -- Install location ------------------------------------------------------
+    Write-Header "Step 2 - Install Location"
     Write-Info "Default install folder: $DefaultDir"
     Ask "Press Enter to accept, or type a custom path:"
     $customDir = (Read-Host "  Path").Trim()
@@ -233,37 +257,71 @@ function Main {
     $InstallPath = Join-Path $InstallDir $BinaryName
     Write-Info "Install path: $InstallPath"
 
-    # ── Check existing installation ────────────────────────────────────────────
-    Write-Header "Step 3 — Check for Existing Installation"
+    # -- Check existing installation -------------------------------------------
+    Write-Header "Step 3 - Check for Existing Installation"
     $IsUpdate = $false
+    $InstalledVersion = "none"
+    $InstalledVersionFile = Get-InstalledVersionFile -InstallPath $InstallPath
 
     if (Test-Path $InstallPath) {
         $IsUpdate = $true
         Write-Warn "Game Sync is already installed at: $InstallPath"
-        $existing = Get-Item $InstallPath
-        Write-Info "Last modified: $($existing.LastWriteTime)"
+        if (Test-Path $InstalledVersionFile) {
+            $InstalledVersion = Normalize-VersionValue (
+                Get-Content $InstalledVersionFile -TotalCount 1 -ErrorAction SilentlyContinue | Select-Object -First 1
+            )
+        } else {
+            $InstalledVersion = "unknown"
+        }
+        Write-Info "Installed version: $InstalledVersion"
     } else {
         Write-Info "No existing installation found at $InstallPath"
     }
 
-    # ── Latest version ─────────────────────────────────────────────────────────
-    Write-Info "Fetching latest release from GitHub …"
-    $LatestVer = Get-LatestVersion
-    if ($LatestVer -ne "unknown") {
+    # -- Latest version --------------------------------------------------------
+    Write-Info "Fetching latest release from GitHub ..."
+    $LatestVer = Normalize-VersionValue (Get-LatestVersion)
+    if (Test-KnownVersion $LatestVer) {
         Write-Ok "Latest release: $LatestVer"
+    } else {
+        Write-Warn "Could not determine the latest release version from GitHub."
+        Write-Warn "The installer can still download the latest available binary, but the version check will be skipped."
     }
 
     if ($IsUpdate) {
-        $doUpdate = Prompt-YesNo "Update Game Sync to the latest release ($LatestVer)?" $true
-        if (-not $doUpdate) {
-            Write-Info "Update cancelled. Running post-install options only."
-            Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
-            return
+        if ((Test-KnownVersion $LatestVer) -and ($InstalledVersion -eq $LatestVer)) {
+            $forceUpdate = Prompt-YesNo "You already have the latest version ($LatestVer). Re-install / force update?" $false
+            if (-not $forceUpdate) {
+                Write-Info "Skipping download - nothing to update."
+                Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
+                return
+            }
+        } elseif (-not (Test-KnownVersion $LatestVer)) {
+            $doUpdate = Prompt-YesNo "Could not verify the latest release version. Download the latest available binary anyway?" $false
+            if (-not $doUpdate) {
+                Write-Info "Update cancelled. Running post-install options only."
+                Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
+                return
+            }
+        } elseif (Test-KnownVersion $InstalledVersion) {
+            $doUpdate = Prompt-YesNo "Update Game Sync from $InstalledVersion to $LatestVer?" $true
+            if (-not $doUpdate) {
+                Write-Info "Update cancelled. Running post-install options only."
+                Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
+                return
+            }
+        } else {
+            $doUpdate = Prompt-YesNo "Could not determine the installed version, but the latest release is $LatestVer. Download and install it now?" $true
+            if (-not $doUpdate) {
+                Write-Info "Update cancelled. Running post-install options only."
+                Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
+                return
+            }
         }
     }
 
-    # ── Download ───────────────────────────────────────────────────────────────
-    Write-Header "Step 4 — Download Game Sync"
+    # -- Download --------------------------------------------------------------
+    Write-Header "Step 4 - Download Game Sync"
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 
     $TmpPath = Join-Path $env:TEMP $BinaryName
@@ -284,6 +342,8 @@ function Main {
     }
 
     Move-Item -Path $TmpPath -Destination $InstallPath -Force
+    $VersionToWrite = if ($LatestVer -ne "unknown") { $LatestVer } else { "unknown" }
+    Set-Content -Path (Get-InstalledVersionFile -InstallPath $InstallPath) -Value $VersionToWrite -Encoding UTF8
     Write-Ok "Game Sync installed to: $InstallPath"
 
     Post-Install -InstallPath $InstallPath -InstallDir $InstallDir -IsUpdate $IsUpdate
@@ -292,8 +352,8 @@ function Main {
 function Post-Install {
     param([string]$InstallPath, [string]$InstallDir, [bool]$IsUpdate)
 
-    # ── Add to PATH ────────────────────────────────────────────────────────────
-    Write-Header "Step 5 — PATH"
+    # -- Add to PATH -----------------------------------------------------------
+    Write-Header "Step 5 - PATH"
     if (-not (PathContainsEntry -PathValue $env:Path -Entry $InstallDir)) {
         $addPath = Prompt-YesNo "Add $InstallDir to your user PATH? (lets you run 'game-sync' from any terminal)" $true
         if ($addPath) { Add-ToUserPath -Dir $InstallDir }
@@ -301,8 +361,8 @@ function Post-Install {
         Write-Ok "$InstallDir is already in your PATH"
     }
 
-    # ── Shortcuts ──────────────────────────────────────────────────────────────
-    Write-Header "Step 6 — Shortcuts"
+    # -- Shortcuts -------------------------------------------------------------
+    Write-Header "Step 6 - Shortcuts"
 
     $makeStartMenu = Prompt-YesNo "Create a Start Menu shortcut?" $true
     if ($makeStartMenu) { New-Shortcut -TargetPath $InstallPath | Out-Null }
@@ -310,8 +370,8 @@ function Post-Install {
     $makeDesktop = Prompt-YesNo "Create a Desktop shortcut?" $false
     if ($makeDesktop) { New-DesktopShortcut -TargetPath $InstallPath }
 
-    # ── SSH / LAN sync ─────────────────────────────────────────────────────────
-    Write-Header "Step 7 — LAN Sync (SSH)"
+    # -- SSH / LAN sync --------------------------------------------------------
+    Write-Header "Step 7 - LAN Sync (SSH)"
     Write-Info "Game Sync uses SSH to sync saves between machines on your network."
     Write-Info "To sync TO this Windows machine, OpenSSH Server must be enabled."
     Write-Warn "This requires administrator privileges."
@@ -328,7 +388,7 @@ function Post-Install {
                 Write-Warn "When run via an inline command (for example, irm ... | iex), PowerShell cannot relaunch this installer with -SSHOnly."
                 Write-Warn "To enable OpenSSH Server, download this installer to a .ps1 file and run it as Administrator with -SSHOnly."
             } else {
-                Write-Warn "Relaunching with administrator rights for SSH setup …"
+                Write-Warn "Relaunching with administrator rights for SSH setup ..."
                 $args = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -SSHOnly"
                 Start-Process powershell -Verb RunAs -ArgumentList $args -Wait
             }
@@ -337,9 +397,9 @@ function Post-Install {
         }
     }
 
-    # ── rclone / Cloud sync ────────────────────────────────────────────────────
-    Write-Header "Step 8 — Cloud Sync (Google Drive / Dropbox)"
-    Write-Info "Cloud sync requires rclone — a free tool."
+    # -- rclone / Cloud sync ---------------------------------------------------
+    Write-Header "Step 8 - Cloud Sync (Google Drive / Dropbox)"
+    Write-Info "Cloud sync requires rclone - a free tool."
     Write-Warn "rclone is NOT needed for LAN sync between two local machines."
 
     $rcloneInstalled = $false
@@ -355,15 +415,15 @@ function Post-Install {
         }
     }
 
-    # ── Summary ────────────────────────────────────────────────────────────────
+    # -- Summary ---------------------------------------------------------------
     Write-Host ""
-    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host "  $('=' * 44)" -ForegroundColor Green
     if ($IsUpdate) {
         Write-Host "  Game Sync updated successfully!" -ForegroundColor Green
     } else {
         Write-Host "  Game Sync installed successfully!" -ForegroundColor Green
     }
-    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host "  $('=' * 44)" -ForegroundColor Green
     Write-Host ""
     Write-Host "  Binary:   $InstallPath" -ForegroundColor White
     Write-Host ""
@@ -376,16 +436,16 @@ function Post-Install {
     Read-Host "  Press Enter to exit"
 }
 
-# ── Uninstall ─────────────────────────────────────────────────────────────────
+# -- Uninstall ----------------------------------------------------------------
 function Uninstall-GameSync {
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Red
-    Write-Host "  ║       Game Sync  Uninstaller        ║" -ForegroundColor Red
-    Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Red
+    Write-Host "  +--------------------------------------+" -ForegroundColor Red
+    Write-Host "  |       Game Sync  Uninstaller        |" -ForegroundColor Red
+    Write-Host "  +--------------------------------------+" -ForegroundColor Red
     Write-Host ""
 
-    # ── Find binary ────────────────────────────────────────────────────────────
+    # -- Find binary -----------------------------------------------------------
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA "GameSync\game-sync.exe"),
         (Join-Path $env:PROGRAMFILES "GameSync\game-sync.exe"),
@@ -427,7 +487,7 @@ function Uninstall-GameSync {
         if ($custom -ne "") { $foundPath = $custom }
     }
 
-    # ── Remove binary ──────────────────────────────────────────────────────────
+    # -- Remove binary ---------------------------------------------------------
     if ($foundPath) {
         Write-Host ""
         Write-Info "The following file will be deleted:"
@@ -435,11 +495,16 @@ function Uninstall-GameSync {
         if (Test-Path "$foundPath.bak") {
             Write-Host "    $foundPath.bak  (backup)" -ForegroundColor White
         }
+        $versionFile = Get-InstalledVersionFile -InstallPath $foundPath
+        if (Test-Path $versionFile) {
+            Write-Host "    $versionFile  (version file)" -ForegroundColor White
+        }
         Ask "Confirm removal?"
         $removeBin = (Read-Host "  Type 'yes' to delete, or press Enter to skip").Trim().ToLower()
         if ($removeBin -eq "yes") {
             Remove-Item $foundPath -Force -ErrorAction SilentlyContinue
             Remove-Item "$foundPath.bak" -Force -ErrorAction SilentlyContinue
+            Remove-Item $versionFile -Force -ErrorAction SilentlyContinue
             Write-Ok "Removed: $foundPath"
 
             # Ask about rclone.exe in same folder
@@ -469,7 +534,7 @@ function Uninstall-GameSync {
                     "$env:PROGRAMFILES\GameSync"
                 )
                 if ($dir -notin $knownDirs) {
-                    Write-Warn "This is a custom directory — deleting it will remove the entire folder."
+                    Write-Warn "This is a custom directory - deleting it will remove the entire folder."
                     Write-Warn "Make sure it does not contain other files you want to keep."
                 }
                 Ask "Delete this empty directory?"
@@ -485,10 +550,10 @@ function Uninstall-GameSync {
             Write-Info "Binary removal skipped."
         }
     } else {
-        Write-Warn "No binary found — skipping binary removal."
+        Write-Warn "No binary found - skipping binary removal."
     }
 
-    # ── Remove Start Menu shortcut ─────────────────────────────────────────────
+    # -- Remove Start Menu shortcut --------------------------------------------
     $startMenuLnk = Join-Path $ShortcutDir "Game Sync.lnk"
     if (Test-Path $startMenuLnk) {
         Write-Host ""
@@ -500,7 +565,7 @@ function Uninstall-GameSync {
         else { Write-Info "Start Menu shortcut kept." }
     } else { Write-Info "No Start Menu shortcut found." }
 
-    # ── Remove Desktop shortcut ────────────────────────────────────────────────
+    # -- Remove Desktop shortcut -----------------------------------------------
     $desktopLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Game Sync.lnk"
     if (Test-Path $desktopLnk) {
         Write-Host ""
@@ -512,7 +577,7 @@ function Uninstall-GameSync {
         else { Write-Info "Desktop shortcut kept." }
     } else { Write-Info "No Desktop shortcut found." }
 
-    # ── Remove settings file ───────────────────────────────────────────────────
+    # -- Remove settings file --------------------------------------------------
     $settings = Join-Path $env:APPDATA "game_sync_settings.json"
     if (Test-Path $settings) {
         Write-Host ""
@@ -524,7 +589,7 @@ function Uninstall-GameSync {
         else { Write-Info "Settings kept at $settings" }
     }
 
-    # ── Remove from user PATH (exact entry match only) ─────────────────────────
+    # -- Remove from user PATH (exact entry match only) ------------------------
     if ($foundPath) {
         $installDir = Split-Path $foundPath
         $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -546,14 +611,14 @@ function Uninstall-GameSync {
     }
 
     Write-Host ""
-    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host "  $('=' * 44)" -ForegroundColor Green
     Write-Host "  Game Sync uninstalled." -ForegroundColor Green
-    Write-Host "  $('═' * 44)" -ForegroundColor Green
+    Write-Host "  $('=' * 44)" -ForegroundColor Green
     Write-Host ""
     Read-Host "  Press Enter to exit"
 }
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# -- Entry point --------------------------------------------------------------
 if ($SSHOnly) {
     Enable-SshServer
     Read-Host "Press Enter to exit"

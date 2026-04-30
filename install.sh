@@ -223,10 +223,10 @@ Terminal=false
 Categories=Utility;Game;
 Keywords=sync;save;game;backup;
 EOF
-    # Refresh desktop database if available (non-fatal)
+    success "Desktop launcher created: $DESKTOP_FILE"
+    # Refresh desktop database at the end so new launchers show up in app menus.
     command -v update-desktop-database &>/dev/null \
         && update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-    success "Desktop launcher created: $DESKTOP_FILE"
 }
 
 # ── rclone install ────────────────────────────────────────────────────────────
@@ -266,6 +266,68 @@ install_rclone_system() {
     require curl
     sudo -v && curl -fsSL https://rclone.org/install.sh | sudo bash
     success "rclone installed"
+}
+
+# ── SSH detection helpers ─────────────────────────────────────────────────────
+find_ssh_service_unit() {
+    local candidates=(
+        ssh.service
+        sshd.service
+        ssh.socket
+        sshd.socket
+        dropbear.service
+        dropbear.socket
+    )
+    local unit
+
+    command -v systemctl &>/dev/null || return 1
+
+    for unit in "${candidates[@]}"; do
+        if systemctl list-unit-files "$unit" --no-legend 2>/dev/null \
+            | awk 'NR == 1 { print $1 }' | grep -Fxq "$unit"; then
+            echo "$unit"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+ssh_server_binary_name() {
+    if command -v sshd &>/dev/null; then
+        echo "sshd"
+        return 0
+    fi
+    if command -v dropbear &>/dev/null; then
+        echo "dropbear"
+        return 0
+    fi
+    return 1
+}
+
+ssh_install_hint() {
+    if $IS_STEAM_DECK; then
+        echo "Steam Deck / Arch: sudo pacman -S openssh"
+        return
+    fi
+
+    case "$OS_NAME" in
+        ubuntu|debian|linuxmint|pop|elementary|zorin|kali)
+            echo "Ubuntu/Debian: sudo apt install openssh-server"
+            ;;
+        fedora|rhel|centos|rocky|alma)
+            echo "Fedora/RHEL: sudo dnf install openssh-server"
+            ;;
+        arch|manjaro|endeavouros|garuda)
+            echo "Arch/Manjaro: sudo pacman -S openssh"
+            ;;
+        opensuse*|sles)
+            echo "openSUSE: sudo zypper install openssh"
+            ;;
+        *)
+            echo "Install an SSH server package such as openssh-server / openssh for your distribution"
+            ;;
+    esac
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -338,12 +400,17 @@ main() {
     header "Step 3 — Check for Existing Installation"
     local is_update=false
     local installed_ver="none"
+    local installed_ver_file
+    installed_ver_file="$(installed_version_file "$install_path")"
 
     if [[ -x "$install_path" ]]; then
         is_update=true
-        # Try to get current version (binary may not support --version, so fallback gracefully)
-        installed_ver="$("$install_path" --version 2>/dev/null | head -1 || echo "unknown")"
         warn "Game Sync is already installed at: $install_path"
+        if [[ -f "$installed_ver_file" ]]; then
+            installed_ver="$(head -1 "$installed_ver_file" 2>/dev/null || echo "unknown")"
+        else
+            installed_ver="unknown"
+        fi
         info "Installed version: ${installed_ver}"
     else
         info "No existing installation found at $install_path"
@@ -464,6 +531,30 @@ goto_post_install() {
     echo -e "  Game Sync uses SSH to sync saves between machines on your home network."
     echo -e "  To sync ${BOLD}to${RESET} this machine, SSH must be enabled."
 
+    local ssh_unit=""
+    local ssh_binary=""
+    ssh_unit="$(find_ssh_service_unit || true)"
+    ssh_binary="$(ssh_server_binary_name || true)"
+
+    if [[ -n "$ssh_unit" ]]; then
+        success "Detected SSH service: $ssh_unit"
+        if command -v systemctl &>/dev/null; then
+            if systemctl is-active --quiet "$ssh_unit"; then
+                success "SSH is already running on this machine."
+            elif systemctl is-enabled --quiet "$ssh_unit"; then
+                info "SSH is installed and enabled, but not currently running."
+            else
+                info "SSH is installed but not enabled yet."
+            fi
+        fi
+    elif [[ -n "$ssh_binary" ]]; then
+        success "Detected SSH server binary: $ssh_binary"
+        warn "No known systemd SSH unit was found automatically."
+    else
+        warn "No SSH server installation was detected."
+        info "Install hint: $(ssh_install_hint)"
+    fi
+
     ask "Enable SSH on this machine now? (allows other machines to push saves here)"
     echo "  Note: you can always enable it later with one of:"
     echo "        sudo systemctl enable --now ssh"
@@ -471,10 +562,17 @@ goto_post_install() {
     read_prompt "Choice [y/N, default N]: " enable_ssh
     enable_ssh="${enable_ssh:-N}"
     if [[ "${enable_ssh,,}" == "y" ]]; then
-        if command -v systemctl &>/dev/null; then
-            if sudo systemctl enable --now ssh; then
+        if [[ -z "$ssh_unit" && -z "$ssh_binary" ]]; then
+            warn "SSH server does not appear to be installed yet."
+            info "Install hint: $(ssh_install_hint)"
+        elif command -v systemctl &>/dev/null; then
+            if [[ -n "$ssh_unit" ]] && sudo systemctl enable --now "$ssh_unit"; then
+                success "SSH enabled and started."
+            elif sudo systemctl enable --now ssh; then
                 success "SSH enabled and started."
             elif sudo systemctl enable --now sshd; then
+                success "SSH enabled and started."
+            elif sudo systemctl enable --now dropbear; then
                 success "SSH enabled and started."
             else
                 warn "Could not start SSH. Run manually: sudo systemctl enable --now ssh or sudo systemctl enable --now sshd"
@@ -614,11 +712,14 @@ uninstall() {
         echo -e "    ${BOLD}${found_path}${RESET}"
         [[ -f "${found_path}.bak" ]] && \
             echo -e "    ${BOLD}${found_path}.bak${RESET}  (backup)"
+        [[ -f "$(installed_version_file "$found_path")" ]] && \
+            echo -e "    ${BOLD}$(installed_version_file "$found_path")${RESET}  (version file)"
         ask "Confirm removal?"
         read_prompt "  Type 'yes' to delete, or press Enter to skip: " remove_bin
         if [[ "${remove_bin,,}" == "yes" ]]; then
             rm -f "$found_path"
             rm -f "${found_path}.bak"
+            rm -f "$(installed_version_file "$found_path")"
             success "Removed: $found_path"
 
             # ── Optionally remove parent directory if empty ─────────────────────
