@@ -35,6 +35,16 @@ GITHUB_API="https://api.github.com/repos/${REPO}/releases/latest"
 DOWNLOAD_BASE="https://github.com/${REPO}/releases/latest/download"
 DESKTOP_FILE="$HOME/.local/share/applications/game-sync.desktop"
 RCLONE_URL="https://downloads.rclone.org/rclone-current-linux-amd64.zip"
+SOURCE_ARCHIVE_BASE="https://github.com/${REPO}/archive/refs/tags"
+
+installed_version_file() {
+    local install_path="$1"
+    echo "${install_path}.version"
+}
+
+source_runtime_dir() {
+    echo "$HOME/.local/share/game-sync"
+}
 
 # ── OS Detection ──────────────────────────────────────────────────────────────
 detect_os() {
@@ -120,6 +130,79 @@ download_file() {
         error "Neither curl nor wget found. Cannot download file."
         exit 1
     fi
+}
+
+resolve_python_cmd() {
+    if command -v python3 &>/dev/null; then
+        echo "python3"
+        return 0
+    fi
+    if command -v python &>/dev/null; then
+        echo "python"
+        return 0
+    fi
+    return 1
+}
+
+install_from_source() {
+    local install_path="$1"
+    local version="$2"
+    local app_root
+    app_root="$(source_runtime_dir)"
+    local src_dir="$app_root/src"
+    local venv_dir="$app_root/venv"
+    local py_cmd
+    py_cmd="$(resolve_python_cmd || true)"
+
+    if [[ -z "$py_cmd" ]]; then
+        error "Python 3 is required for Steam Deck compatibility install, but it was not found."
+        exit 1
+    fi
+
+    require tar
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    local archive_url
+    if [[ -n "$version" && "$version" != "latest" && "$version" != "unknown" ]]; then
+        archive_url="${SOURCE_ARCHIVE_BASE}/${version}.tar.gz"
+    else
+        archive_url="https://github.com/${REPO}/archive/refs/heads/main.tar.gz"
+    fi
+
+    info "Steam Deck detected — using source install for better system-library compatibility."
+    info "Downloading source archive: $archive_url"
+    download_file "$archive_url" "$tmpdir/game-sync-src.tar.gz"
+    mkdir -p "$tmpdir/extract"
+    tar -xzf "$tmpdir/game-sync-src.tar.gz" -C "$tmpdir/extract"
+
+    local extracted_dir
+    extracted_dir="$(find "$tmpdir/extract" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    if [[ -z "$extracted_dir" ]]; then
+        error "Could not unpack the Game Sync source archive."
+        exit 1
+    fi
+
+    mkdir -p "$app_root"
+    rm -rf "$src_dir"
+    cp -a "$extracted_dir" "$src_dir"
+
+    info "Creating Python virtual environment …"
+    "$py_cmd" -m venv "$venv_dir"
+    "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
+    info "Installing Python dependencies …"
+    "$venv_dir/bin/pip" install -r "$src_dir/requirements.txt"
+
+    cat > "$install_path" << EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$venv_dir/bin/python" "$src_dir/game-sync.py" "\$@"
+EOF
+    chmod +x "$install_path"
+
+    printf '%s\n' "${version:-unknown}" > "$(installed_version_file "$install_path")"
+    success "Game Sync installed in Steam Deck compatibility mode."
 }
 
 # ── .desktop file creation ────────────────────────────────────────────────────
@@ -301,13 +384,7 @@ main() {
 
     # ── Download binary ────────────────────────────────────────────────────────
     header "Step 4 — Download Game Sync"
-    local download_url="${DOWNLOAD_BASE}/${BINARY_NAME}"
-    info "Downloading from: $download_url"
     mkdir -p "$install_dir"
-
-    local tmp_bin
-    tmp_bin="$(mktemp)"
-    download_file "$download_url" "$tmp_bin"
 
     # Backup existing binary if updating
     if $is_update && [[ -f "$install_path" ]]; then
@@ -315,9 +392,25 @@ main() {
         info "Backed up existing binary to ${install_path}.bak"
     fi
 
-    mv "$tmp_bin" "$install_path"
-    chmod +x "$install_path"
-    success "Game Sync installed to: $install_path"
+    if $IS_STEAM_DECK; then
+        install_from_source "$install_path" "$latest_ver"
+    else
+        local download_url="${DOWNLOAD_BASE}/${BINARY_NAME}"
+        info "Downloading from: $download_url"
+
+        local tmp_bin
+        tmp_bin="$(mktemp)"
+        download_file "$download_url" "$tmp_bin"
+
+        mv "$tmp_bin" "$install_path"
+        chmod +x "$install_path"
+        if [[ "$latest_ver" != "latest" ]]; then
+            printf '%s\n' "$latest_ver" > "$(installed_version_file "$install_path")"
+        else
+            printf '%s\n' "unknown" > "$(installed_version_file "$install_path")"
+        fi
+        success "Game Sync installed to: $install_path"
+    fi
 
     goto_post_install "$install_path" "$detected_category" $is_update
 }
@@ -592,6 +685,23 @@ uninstall() {
             success "Removed: $settings"
         else
             info "Settings kept at $settings"
+        fi
+    fi
+
+    # ── Remove Steam Deck / source runtime dir ────────────────────────────────
+    local runtime_dir
+    runtime_dir="$(source_runtime_dir)"
+    if [[ -d "$runtime_dir" ]]; then
+        echo ""
+        info "The following directory may be deleted (source install runtime / virtualenv):"
+        echo -e "    ${BOLD}${runtime_dir}${RESET}"
+        ask "Remove the Game Sync runtime directory? (default: keep)"
+        read_prompt "  Type 'yes' to delete, or press Enter to keep: " remove_runtime
+        if [[ "${remove_runtime,,}" == "yes" ]]; then
+            rm -rf "$runtime_dir"
+            success "Removed: $runtime_dir"
+        else
+            info "Runtime directory kept at $runtime_dir"
         fi
     fi
 
