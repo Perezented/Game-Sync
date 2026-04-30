@@ -117,6 +117,10 @@ rm -f ~/game_sync_settings.json
 
 ### Windows
 
+|    |    |
+| -- | -- |
+| Windows Application | ![Windows App](/images/windows_app_pull_complete_from_steam_deck.png) |
+
 Run the installer script with the `-Uninstall` flag:
 
 ```powershell
@@ -198,6 +202,10 @@ EOF
 ---
 
 ## Linux Distros (Desktop App)
+
+|    |    |
+| -- | -- |
+| Linux Application | ![Linux App](/images/linux_app_pull_steam_deck.png) |
 
 1. Download `game-sync` from the [Releases page](https://github.com/Perezented/Game-Sync/releases)
 2. Open a terminal in the folder where you saved it and make it executable:
