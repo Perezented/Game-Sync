@@ -137,7 +137,7 @@ resolve_python_cmd() {
         echo "python3"
         return 0
     fi
-    if command -v python &>/dev/null; then
+    if command -v python &>/dev/null && python -c 'import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)' &>/dev/null; then
         echo "python"
         return 0
     fi
@@ -162,7 +162,7 @@ install_from_source() {
     require tar
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+        trap 'rm -rf -- "$tmpdir"; trap - RETURN' RETURN
 
     local archive_url
     if [[ -n "$version" && "$version" != "latest" && "$version" != "unknown" ]]; then
@@ -189,10 +189,10 @@ install_from_source() {
     cp -a "$extracted_dir" "$src_dir"
 
     info "Creating Python virtual environment …"
-    "$py_cmd" -m venv "$venv_dir"
+    "$py_cmd" -m venv --clear "$venv_dir"
     "$venv_dir/bin/python" -m pip install --upgrade pip >/dev/null
     info "Installing Python dependencies …"
-    "$venv_dir/bin/pip" install -r "$src_dir/requirements.txt"
+    "$venv_dir/bin/python" -m pip install --upgrade -r "$src_dir/requirements.txt"
 
     cat > "$install_path" << EOF
 #!/usr/bin/env bash
@@ -242,7 +242,7 @@ install_rclone_home() {
     require unzip
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' RETURN
+        trap 'rm -rf -- "$tmpdir"; trap - RETURN' RETURN
     download_file "$RCLONE_URL" "$tmpdir/rclone.zip"
     unzip -q "$tmpdir/rclone.zip" -d "$tmpdir/rclone-tmp"
     mkdir -p "$HOME/.local/bin"
