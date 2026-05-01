@@ -83,10 +83,11 @@ function Download-File {
     Write-Info "Downloading: $Url"
     $wc = New-Object System.Net.WebClient
     # Show progress via event
-    $wc.DownloadProgressChanged += {
-        $pct = $_.ProgressPercentage
+    $wc.add_DownloadProgressChanged({
+        param($sender, $e)
+        $pct = $e.ProgressPercentage
         Write-Progress -Activity "Downloading $BinaryName" -PercentComplete $pct -Status "$pct%"
-    }
+    })
     $task = $wc.DownloadFileTaskAsync($Url, $Dest)
     while (-not $task.IsCompleted) { Start-Sleep -Milliseconds 200 }
     Write-Progress -Activity "Downloading $BinaryName" -Completed
