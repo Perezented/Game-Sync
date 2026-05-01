@@ -2,6 +2,8 @@ import os
 import platform
 import subprocess
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -276,6 +278,31 @@ class LocalNetworkSync:
                     if entry.st_mtime is not None:
                         os.utime(str(l_path), (entry.st_mtime, entry.st_mtime))
 
+    # ── zip helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _zip_folder(local_path: str, zip_path: str, on_line=None) -> None:
+        """Zip a directory into zip_path, preserving the top-level folder name."""
+        src = Path(local_path)
+        parent = src.parent
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file in sorted(src.rglob("*")):
+                if file.is_file():
+                    zf.write(file, file.relative_to(parent))
+        size_kib = Path(zip_path).stat().st_size // 1024
+        if on_line:
+            on_line(f"[zip] {Path(zip_path).name} ready ({size_kib:,} KiB)")
+
+    @staticmethod
+    def _unzip_to(zip_path: str, dest_dir: str, on_line=None) -> None:
+        """Extract zip_path into dest_dir (overwrites existing files)."""
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(dest)
+        if on_line:
+            on_line(f"[unzip] Extracted to {dest_dir}")
+
     # ── public transfer methods ────────────────────────────────────────────────
 
     def upload(self, local_path: str | Path, cloud_folder: str):
@@ -392,6 +419,7 @@ class LocalNetworkSync:
         on_line=None,
         on_proc=None,
         cancelled=None,
+        zip_transfer: bool = False,
     ):
         """Push local_path to absolute remote_path on the remote machine."""
 
@@ -415,6 +443,39 @@ class LocalNetworkSync:
                 f"Local source path does not exist: {lp}\n"
                 f"Check the Source Path field in the UI."
             )
+
+        if zip_transfer and lp.is_dir():
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError(
+                    "paramiko is required for zip LAN transfers. Run: pip install paramiko"
+                )
+            client, sftp = self._sftp_client()
+            try:
+                remote_path = self._expand_remote_path(client, remote_path)
+                remote_parent = str(Path(remote_path).parent).replace("\\", "/")
+                zip_name = lp.name + ".zip"
+                remote_zip = f"{remote_parent}/{zip_name}"
+                _log(f"[zip] Compressing {lp.name}\u2026")
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_zip = str(Path(tmpdir) / zip_name)
+                    self._zip_folder(str(lp), tmp_zip, _log)
+                    if cancelled and cancelled():
+                        raise RuntimeError("Cancelled.")
+                    self._sftp_mkdir_p(sftp, remote_parent)
+                    _log(f"[zip upload] {zip_name} \u2192 {remote_zip}")
+                    sftp.put(tmp_zip, remote_zip)
+                _log(f"[unzip remote] extracting on remote\u2026")
+                _, stdout, _ = client.exec_command(
+                    f'cd "{remote_parent}" && unzip -o "{zip_name}" && rm -f "{zip_name}"'
+                )
+                for line in stdout:
+                    _log(line.rstrip())
+                stdout.channel.recv_exit_status()
+            finally:
+                sftp.close()
+                client.close()
+            return
+
         has_rsync = shutil.which("rsync") is not None
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
@@ -465,6 +526,7 @@ class LocalNetworkSync:
         on_line=None,
         on_proc=None,
         cancelled=None,
+        zip_transfer: bool = False,
     ):
         """Pull from absolute remote_path on the remote machine to local_path."""
 
@@ -483,6 +545,42 @@ class LocalNetworkSync:
             .resolve()
         )
         _log(f"[pull] remote={remote_path}  local={lp}")
+
+        if zip_transfer:
+            if not PARAMIKO_AVAILABLE:
+                raise RuntimeError(
+                    "paramiko is required for zip LAN transfers. Run: pip install paramiko"
+                )
+            client, sftp = self._sftp_client()
+            try:
+                remote_path = self._expand_remote_path(client, remote_path)
+                remote_parent = str(Path(remote_path).parent).replace("\\", "/")
+                folder_name = Path(remote_path).name
+                zip_name = folder_name + ".zip"
+                remote_zip = f"{remote_parent}/{zip_name}"
+                _log(f"[zip remote] zipping {folder_name} on remote\u2026")
+                _, stdout, _ = client.exec_command(
+                    f'cd "{remote_parent}" && zip -r "{zip_name}" "{folder_name}"'
+                )
+                for line in stdout:
+                    _log(line.rstrip())
+                if stdout.channel.recv_exit_status() != 0:
+                    raise RuntimeError("Remote zip failed — is 'zip' installed on the remote?")
+                if cancelled and cancelled():
+                    client.exec_command(f'rm -f "{remote_zip}"')
+                    raise RuntimeError("Cancelled.")
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_zip = str(Path(tmpdir) / zip_name)
+                    _log(f"[zip download] {remote_zip} \u2192 (temp)")
+                    sftp.get(remote_zip, tmp_zip)
+                    _log(f"[unzip] Extracting {zip_name}\u2026")
+                    self._unzip_to(tmp_zip, str(lp.parent), _log)
+                client.exec_command(f'rm -f "{remote_zip}"')
+            finally:
+                sftp.close()
+                client.close()
+            return
+
         has_rsync = shutil.which("rsync") is not None
         if self.ssh_password or not has_rsync:
             if not PARAMIKO_AVAILABLE:
@@ -548,12 +646,14 @@ class DirectSyncWorkerThread(QThread):
         operation: str,
         local_path: str,
         remote_path: str,
+        zip_transfer: bool = False,
     ):
         super().__init__()
         self.sync_obj = sync_obj
         self.operation = operation  # "push" or "pull"
         self.local_path = local_path
         self.remote_path = remote_path
+        self.zip_transfer = zip_transfer
         self._cancelled = False
         self._proc = None
 
@@ -580,6 +680,7 @@ class DirectSyncWorkerThread(QThread):
                     on_line=self.progress.emit,
                     on_proc=self._store_proc,
                     cancelled=lambda: self._cancelled,
+                    zip_transfer=self.zip_transfer,
                 )
             else:
                 self.sync_obj.pull_path(
@@ -588,6 +689,7 @@ class DirectSyncWorkerThread(QThread):
                     on_line=self.progress.emit,
                     on_proc=self._store_proc,
                     cancelled=lambda: self._cancelled,
+                    zip_transfer=self.zip_transfer,
                 )
             if self._cancelled:
                 self.finished.emit(False, "Cancelled.")
