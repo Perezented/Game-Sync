@@ -281,6 +281,62 @@ class LocalNetworkSync:
     # ── zip helpers ───────────────────────────────────────────────────────────
 
     @staticmethod
+    def _build_remote_zip_cmd(remote_parent: str, folder_name: str, zip_name: str) -> str:
+        """Return a shell command that zips folder_name→zip_name on the remote.
+
+        Fallback order so the command works without a system 'zip' binary:
+          1. zip  (common on Linux/macOS)
+          2. python3 -c  (zipfile stdlib)
+          3. python  -c  (zipfile stdlib)
+          4. PowerShell Compress-Archive  (Windows remotes)
+        """
+        py_code = (
+            "import zipfile,os;"
+            f"_z=zipfile.ZipFile(r'{zip_name}','w',zipfile.ZIP_DEFLATED);"
+            f"[_z.write(os.path.join(_r,_f),os.path.relpath(os.path.join(_r,_f)))"
+            f" for _r,_d,_fs in os.walk(r'{folder_name}') for _f in _fs];"
+            "_z.close()"
+        )
+        ps_cmd = (
+            f'powershell -Command \'Compress-Archive -Path "{folder_name}"'
+            f' -DestinationPath "{zip_name}" -Force\''
+        )
+        return (
+            f'cd "{remote_parent}" && '
+            f'(zip -r "{zip_name}" "{folder_name}" '
+            f'|| python3 -c "{py_code}" '
+            f'|| python -c "{py_code}" '
+            f'|| {ps_cmd})'
+        )
+
+    @staticmethod
+    def _build_remote_unzip_cmd(remote_parent: str, zip_name: str) -> str:
+        """Return a shell command that extracts zip_name in remote_parent then removes it.
+
+        Fallback order:
+          1. unzip  (common on Linux/macOS)
+          2. python3 -c  (zipfile stdlib)
+          3. python  -c  (zipfile stdlib)
+          4. PowerShell Expand-Archive  (Windows remotes)
+        """
+        py_code = (
+            f"import zipfile;"
+            f"zipfile.ZipFile(r'{zip_name}').extractall('.')"
+        )
+        ps_cmd = (
+            f'powershell -Command \'Expand-Archive -Path "{zip_name}"'
+            f' -DestinationPath "." -Force\''
+        )
+        return (
+            f'cd "{remote_parent}" && '
+            f'(unzip -o "{zip_name}" '
+            f'|| python3 -c "{py_code}" '
+            f'|| python -c "{py_code}" '
+            f'|| {ps_cmd}) '
+            f'&& rm -f "{zip_name}"'
+        )
+
+    @staticmethod
     def _zip_folder(local_path: str, zip_path: str, on_line=None) -> None:
         """Zip a directory into zip_path, preserving the top-level folder name."""
         src = Path(local_path)
@@ -465,12 +521,16 @@ class LocalNetworkSync:
                     _log(f"[zip upload] {zip_name} \u2192 {remote_zip}")
                     sftp.put(tmp_zip, remote_zip)
                 _log(f"[unzip remote] extracting on remote\u2026")
-                _, stdout, _ = client.exec_command(
-                    f'cd "{remote_parent}" && unzip -o "{zip_name}" && rm -f "{zip_name}"'
-                )
+                unzip_cmd = self._build_remote_unzip_cmd(remote_parent, zip_name)
+                _, stdout, stderr_ch = client.exec_command(unzip_cmd)
                 for line in stdout:
                     _log(line.rstrip())
-                stdout.channel.recv_exit_status()
+                if stdout.channel.recv_exit_status() != 0:
+                    err = stderr_ch.read().decode().strip()
+                    raise RuntimeError(
+                        f"Remote unzip failed — no 'unzip', python, or PowerShell found on remote."
+                        + (f"\n{err}" if err else "")
+                    )
             finally:
                 sftp.close()
                 client.close()
@@ -559,13 +619,16 @@ class LocalNetworkSync:
                 zip_name = folder_name + ".zip"
                 remote_zip = f"{remote_parent}/{zip_name}"
                 _log(f"[zip remote] zipping {folder_name} on remote\u2026")
-                _, stdout, _ = client.exec_command(
-                    f'cd "{remote_parent}" && zip -r "{zip_name}" "{folder_name}"'
-                )
+                zip_cmd = self._build_remote_zip_cmd(remote_parent, folder_name, zip_name)
+                _, stdout, stderr_ch = client.exec_command(zip_cmd)
                 for line in stdout:
                     _log(line.rstrip())
                 if stdout.channel.recv_exit_status() != 0:
-                    raise RuntimeError("Remote zip failed — is 'zip' installed on the remote?")
+                    err = stderr_ch.read().decode().strip()
+                    raise RuntimeError(
+                        f"Remote zip failed — no 'zip', python, or PowerShell found on remote."
+                        + (f"\n{err}" if err else "")
+                    )
                 if cancelled and cancelled():
                     client.exec_command(f'rm -f "{remote_zip}"')
                     raise RuntimeError("Cancelled.")
