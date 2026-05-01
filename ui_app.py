@@ -935,6 +935,15 @@ class SyncApp(QMainWindow):
         cloud_folder_layout.addWidget(self.cloud_folder_input)
         cloud_layout.addWidget(self.cloud_folder_row)
 
+        self.zip_cloud_cb = QCheckBox("Zip before cloud transfer (faster for saves with many small files)")
+        self.zip_cloud_cb.setToolTip(
+            "Pack the save folder into a single zip before uploading.\n"
+            "Dramatically faster for games with thousands of small files (e.g. Project Zomboid).\n"
+            "Note: re-uploads the full archive each time — incremental sync is disabled."
+        )
+        self.zip_cloud_cb.toggled.connect(self.save_settings)
+        cloud_layout.addWidget(self.zip_cloud_cb)
+
         self.cloud_section.setLayout(cloud_layout)
         content_layout.addWidget(self.cloud_section)
 
@@ -1128,6 +1137,16 @@ class SyncApp(QMainWindow):
         )
         self.direct_sync_status_label.setVisible(False)
 
+        self.zip_lan_cb = QCheckBox("Zip before LAN transfer (faster for saves with many small files)")
+        self.zip_lan_cb.setToolTip(
+            "Pack the save folder into a single zip before transferring over the network.\n"
+            "Useful for saves with thousands of small files (e.g. Project Zomboid).\n"
+            "Requires 'zip'/'unzip' on the remote machine and paramiko installed locally.\n"
+            "Note: re-transfers the full archive each time — incremental sync is disabled."
+        )
+        self.zip_lan_cb.setVisible(False)
+        self.zip_lan_cb.toggled.connect(self.save_settings)
+
         self.push_cloud_btn = QPushButton("⬆  Push to Cloud")
         self.push_cloud_btn.setStyleSheet("background-color: #2a5f8a; color: white;")
         self.push_cloud_btn.setVisible(False)
@@ -1154,6 +1173,7 @@ class SyncApp(QMainWindow):
         content_layout.addWidget(
             self.direct_sync_status_label, alignment=Qt.AlignmentFlag.AlignCenter
         )
+        content_layout.addWidget(self.zip_lan_cb)
 
         self.warning_label = QLabel(
             "Syncing large game files may take time. Please be patient and do not interrupt the process."
@@ -1413,6 +1433,7 @@ class SyncApp(QMainWindow):
         dest_selected = bool(self._current_dest_mac or self._current_dest_ip)
         self.sync_button.setVisible(not cloud_on and dest_selected)
         self.pull_dest_btn.setVisible(not cloud_on and dest_selected)
+        self.zip_lan_cb.setVisible(not cloud_on and dest_selected)
         self.push_cloud_btn.setVisible(cloud_on)
         self.pull_cloud_btn.setVisible(cloud_on)
         self.cloud_op_status_label.setVisible(cloud_on)
@@ -1441,6 +1462,7 @@ class SyncApp(QMainWindow):
             else "(sub-folder appended to remote path above, e.g. Zomboid)"
         )
         self.cloud_folder_row.setVisible(not is_local)
+        self.zip_cloud_cb.setVisible(not is_local)
         if (
             btn_id == 3
             and self.lm_host_dropdown.count() <= 1
@@ -1458,9 +1480,14 @@ class SyncApp(QMainWindow):
         saved_folder = saved_clouds.get(game)
         if saved_folder:
             self.cloud_folder_input.setText(saved_folder)
-            return
+        else:
+            self.cloud_folder_input.setText(f"/GameSync/{game}/")
 
-        self.cloud_folder_input.setText(f"/GameSync/{game}/")
+        saved_zip = self.previous_paths.get("game_zip_cloud", {}).get(game, False)
+        self.zip_cloud_cb.setChecked(saved_zip)
+
+        saved_zip_lan = self.previous_paths.get("game_zip_lan", {}).get(game, False)
+        self.zip_lan_cb.setChecked(saved_zip_lan)
 
     def _refresh_local_machine_scan_state(self):
         has_hosts = self.lm_host_dropdown.count() > 1
@@ -1742,7 +1769,8 @@ class SyncApp(QMainWindow):
         self.sync_active = True
 
         self._direct_worker = DirectSyncWorkerThread(
-            sync_obj, operation, local_path, remote_path
+            sync_obj, operation, local_path, remote_path,
+            zip_transfer=self.zip_lan_cb.isChecked(),
         )
         self._direct_worker.progress.connect(self._on_direct_sync_progress)
         self._direct_worker.finished.connect(self._on_direct_sync_finished)
@@ -2087,7 +2115,9 @@ class SyncApp(QMainWindow):
         self.progress_bar.setRange(0, 0)
 
         self.cloud_worker = CloudWorkerThread(
-            operation, sync_obj, local_path, cloud_folder
+            operation, sync_obj, local_path, cloud_folder,
+            zip_transfer=self.zip_cloud_cb.isChecked(),
+            zip_lan=self.zip_lan_cb.isChecked(),
         )
         self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
         self.cloud_worker.progress.connect(self._log_append)
@@ -2159,7 +2189,9 @@ class SyncApp(QMainWindow):
             name, sync_obj = remaining[0]
             self.cloud_op_status_label.setText(f"{operation.title()}ing via {name}…")
             self.cloud_worker = CloudWorkerThread(
-                operation, sync_obj, local_path, cloud_folder
+                operation, sync_obj, local_path, cloud_folder,
+                zip_transfer=self.zip_cloud_cb.isChecked(),
+                zip_lan=self.zip_lan_cb.isChecked(),
             )
             self.cloud_worker.progress.connect(self.cloud_op_status_label.setText)
             self.cloud_worker.progress.connect(self._log_append)
@@ -2614,6 +2646,7 @@ class SyncApp(QMainWindow):
             self.dest_ssh_section.setVisible(False)
             self.pull_dest_btn.setVisible(False)
             self.sync_button.setVisible(False)
+            self.zip_lan_cb.setVisible(False)
             self.direct_sync_status_label.setVisible(False)
             self.dest_label.setVisible(False)
             self.dest_path.setVisible(False)
@@ -2646,6 +2679,7 @@ class SyncApp(QMainWindow):
         self.dest_ssh_section.setVisible(not cloud_on)
         self.pull_dest_btn.setVisible(not cloud_on)
         self.sync_button.setVisible(not cloud_on)
+        self.zip_lan_cb.setVisible(not cloud_on)
         self.direct_sync_status_label.setVisible(not cloud_on)
         self.dest_label.setVisible(not cloud_on)
         self.dest_path.setVisible(not cloud_on)
@@ -2887,6 +2921,18 @@ class SyncApp(QMainWindow):
             self.cloud_folder_input.text()
         )
         settings["game_cloud_folders"] = game_cloud_folders
+
+        game_zip_cloud = settings.get("game_zip_cloud", {})
+        game_zip_cloud[self.game_dropdown.currentText() or "__unknown__"] = (
+            self.zip_cloud_cb.isChecked()
+        )
+        settings["game_zip_cloud"] = game_zip_cloud
+
+        game_zip_lan = settings.get("game_zip_lan", {})
+        game_zip_lan[self.game_dropdown.currentText() or "__unknown__"] = (
+            self.zip_lan_cb.isChecked()
+        )
+        settings["game_zip_lan"] = game_zip_lan
 
         if self._current_dest_mac:
             dest_machine_creds = settings.get("dest_machine_creds", {})

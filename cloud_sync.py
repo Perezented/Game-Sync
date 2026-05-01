@@ -2,6 +2,8 @@ import os
 import platform
 import subprocess
 import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -91,8 +93,32 @@ class RcloneSync:
                 "rclone is not installed. Install it from https://rclone.org/install/."
             )
 
+    @staticmethod
+    def _zip_folder(local_path: str, zip_path: str, on_line=None) -> None:
+        """Zip a directory into zip_path, preserving the top-level folder name."""
+        src = Path(local_path)
+        parent = src.parent
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for file in sorted(src.rglob("*")):
+                if file.is_file():
+                    zf.write(file, file.relative_to(parent))
+        size_kib = Path(zip_path).stat().st_size // 1024
+        if on_line:
+            on_line(f"[zip] {Path(zip_path).name} ready ({size_kib:,} KiB)")
+
+    @staticmethod
+    def _unzip_to(zip_path: str, dest_dir: str, on_line=None) -> None:
+        """Extract zip_path into dest_dir (overwrites existing files)."""
+        dest = Path(dest_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(dest)
+        if on_line:
+            on_line(f"[unzip] Extracted to {dest_dir}")
+
     def upload(
-        self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None
+        self, local_path, cloud_folder, on_line=None, on_proc=None, cancelled=None,
+        zip_transfer: bool = False,
     ):
         self._ensure_rclone_installed()
         cfg = self._write_config()
@@ -106,6 +132,27 @@ class RcloneSync:
             .resolve()
         )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+
+        if zip_transfer and Path(local_path).is_dir():
+            zip_name = Path(local_path).name + ".zip"
+            if on_line:
+                on_line(f"[zip] Compressing {Path(local_path).name}…")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zip_path = str(Path(tmpdir) / zip_name)
+                self._zip_folder(local_path, zip_path, on_line)
+                if on_line:
+                    on_line(f"[rclone upload] {zip_path!r}  →  {remote!r}")
+                self._run(
+                    [
+                        "rclone", "copyto", "--config", str(cfg),
+                        zip_path,
+                        f"{remote.rstrip('/')}/{zip_name}",
+                        "-v", "--stats-one-line-date",
+                    ],
+                    on_line, on_proc, cancelled,
+                )
+            return
+
         if on_line:
             on_line(f"[rclone upload] {local_path!r}  →  {remote!r}")
         self._run(
@@ -125,7 +172,8 @@ class RcloneSync:
         )
 
     def download(
-        self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None
+        self, cloud_folder, local_path, on_line=None, on_proc=None, cancelled=None,
+        zip_transfer: bool = False,
     ):
         self._ensure_rclone_installed()
         cfg = self._write_config()
@@ -139,6 +187,29 @@ class RcloneSync:
             .resolve()
         )
         remote = f"{self.provider}:{cloud_folder.lstrip('/')}"
+
+        if zip_transfer:
+            zip_name = Path(local_path).name + ".zip"
+            remote_zip = f"{remote.rstrip('/')}/{zip_name}"
+            if on_line:
+                on_line(f"[rclone download] {remote_zip!r}  →  (temp)")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_zip = str(Path(tmpdir) / zip_name)
+                self._run(
+                    [
+                        "rclone", "copyto", "--config", str(cfg),
+                        remote_zip, tmp_zip,
+                        "-v", "--stats-one-line-date",
+                    ],
+                    on_line, on_proc, cancelled,
+                )
+                if cancelled and cancelled():
+                    return
+                if on_line:
+                    on_line(f"[unzip] Extracting {zip_name}…")
+                self._unzip_to(tmp_zip, str(Path(local_path).parent), on_line)
+            return
+
         Path(local_path).mkdir(parents=True, exist_ok=True)
         if on_line:
             on_line(f"[rclone download] {remote!r}  →  {local_path!r}")
@@ -166,12 +237,15 @@ class CloudWorkerThread(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)  # success, message
 
-    def __init__(self, operation: str, sync_obj, local_path: str, cloud_folder: str):
+    def __init__(self, operation: str, sync_obj, local_path: str, cloud_folder: str,
+                 zip_transfer: bool = False, zip_lan: bool = False):
         super().__init__()
         self.operation = operation  # "upload" or "download"
         self.sync_obj = sync_obj
         self.local_path = local_path
         self.cloud_folder = cloud_folder
+        self.zip_transfer = zip_transfer
+        self.zip_lan = zip_lan
         self._cancelled = False
         self._proc = None  # subprocess.Popen reference for LocalNetworkSync rsync
 
@@ -208,6 +282,7 @@ class CloudWorkerThread(QThread):
                         on_line=self.progress.emit,
                         on_proc=self._store_proc,
                         cancelled=lambda: self._cancelled,
+                        zip_transfer=self.zip_lan,
                     )
                     if self._cancelled:
                         self.finished.emit(False, "Cancelled.")
@@ -221,6 +296,7 @@ class CloudWorkerThread(QThread):
                         on_line=self.progress.emit,
                         on_proc=self._store_proc,
                         cancelled=lambda: self._cancelled,
+                        zip_transfer=self.zip_lan,
                     )
                     if self._cancelled:
                         self.finished.emit(False, "Cancelled.")
@@ -237,6 +313,7 @@ class CloudWorkerThread(QThread):
                     on_line=self.progress.emit,
                     on_proc=self._store_proc,
                     cancelled=lambda: self._cancelled,
+                    zip_transfer=self.zip_transfer,
                 )
                 if self._cancelled:
                     self.finished.emit(False, "Cancelled.")
@@ -249,6 +326,7 @@ class CloudWorkerThread(QThread):
                     on_line=self.progress.emit,
                     on_proc=self._store_proc,
                     cancelled=lambda: self._cancelled,
+                    zip_transfer=self.zip_transfer,
                 )
                 if self._cancelled:
                     self.finished.emit(False, "Cancelled.")
