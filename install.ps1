@@ -214,10 +214,34 @@ function Add-ToUserPath {
     }
 }
 
+function Get-SshServerStatus {
+    $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $service = Get-Service sshd -ErrorAction SilentlyContinue
+    $port22Rules = Get-NetFirewallPortFilter -Protocol TCP -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalPort -eq 22 } |
+        ForEach-Object {
+            Get-NetFirewallRule -AssociatedNetFirewallPortFilter $_ -ErrorAction SilentlyContinue
+        } |
+        Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Enabled -eq 'True' }
+
+    $isInstalled = ($null -ne $capability) -and ($capability.State -eq "Installed")
+    $isRunning = ($null -ne $service) -and ($service.Status -eq "Running")
+    $isAutomatic = ($null -ne $service) -and ($service.StartType -eq "Automatic")
+    $firewallAllows22 = @($port22Rules).Count -gt 0
+
+    return [pscustomobject]@{
+        Installed        = $isInstalled
+        Running          = $isRunning
+        Automatic        = $isAutomatic
+        FirewallAllows22 = $firewallAllows22
+        Ready            = $isInstalled -and $isRunning -and $isAutomatic -and $firewallAllows22
+    }
+}
+
 # -- Enable OpenSSH Server ----------------------------------------------------
 function Enable-SshServer {
     Write-Info "Checking SSH Server ..."
-    $feature = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue
+    $feature = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $feature) {
         Write-Warn "Could not query OpenSSH Server capability. Enable manually via Settings → Optional Features."
         return
@@ -402,7 +426,39 @@ function Post-Install {
     Write-Info "To sync TO this Windows machine, OpenSSH Server must be enabled."
     Write-Warn "This requires administrator privileges."
 
-    $enableSsh = Prompt-YesNo "Enable OpenSSH Server so other machines can sync to this PC?" $false
+    $sshStatus = Get-SshServerStatus
+    if ($sshStatus.Ready) {
+        Write-Ok "OpenSSH Server is already installed, running, set to start automatically, and allowed through the firewall on TCP 22."
+    } else {
+        if ($sshStatus.Installed) {
+            Write-Info "OpenSSH Server is installed."
+        } else {
+            Write-Info "OpenSSH Server is not installed."
+        }
+
+        if ($sshStatus.Running) {
+            Write-Info "sshd service is running."
+        } else {
+            Write-Info "sshd service is not running."
+        }
+
+        if ($sshStatus.Automatic) {
+            Write-Info "sshd is set to start automatically."
+        } else {
+            Write-Info "sshd is not set to start automatically."
+        }
+
+        if ($sshStatus.FirewallAllows22) {
+            Write-Info "Firewall already allows inbound TCP 22."
+        } else {
+            Write-Info "Firewall does not currently allow inbound TCP 22."
+        }
+    }
+
+    $enableSsh = $false
+    if (-not $sshStatus.Ready) {
+        $enableSsh = Prompt-YesNo "Enable or finish configuring OpenSSH Server so other machines can sync to this PC?" $false
+    }
     if ($enableSsh) {
         # Re-launch as admin if not already elevated
         $isAdmin = ([Security.Principal.WindowsPrincipal] `
