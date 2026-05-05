@@ -18,6 +18,7 @@ $Repo        = "Perezented/Game-Sync"
 $BinaryName  = "game-sync.exe"
 $GithubApi   = "https://api.github.com/repos/$Repo/releases/latest"
 $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$BinaryName"
+$DownloadUserAgent = "Game-Sync-Installer"
 $DefaultDir  = Join-Path $env:LOCALAPPDATA "GameSync"
 $ShortcutDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 
@@ -77,21 +78,45 @@ function Test-KnownVersion {
     return (Normalize-VersionValue $Version).ToLowerInvariant() -ne "unknown"
 }
 
+function Enable-Tls12IfAvailable {
+    $tls12 = [Net.SecurityProtocolType]::Tls12
+    if (([Net.ServicePointManager]::SecurityProtocol -band $tls12) -eq 0) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor $tls12
+    }
+}
+
 # -- Download with progress ---------------------------------------------------
 function Download-File {
     param([string]$Url, [string]$Dest)
+
     Write-Info "Downloading: $Url"
-    $wc = New-Object System.Net.WebClient
-    # Show progress via event
-    $wc.add_DownloadProgressChanged({
-        param($sender, $e)
-        $pct = $e.ProgressPercentage
-        Write-Progress -Activity "Downloading $BinaryName" -PercentComplete $pct -Status "$pct%"
-    })
-    $task = $wc.DownloadFileTaskAsync($Url, $Dest)
-    while (-not $task.IsCompleted) { Start-Sleep -Milliseconds 200 }
-    Write-Progress -Activity "Downloading $BinaryName" -Completed
-    if ($task.IsFaulted) { throw $task.Exception.InnerException }
+
+    Enable-Tls12IfAvailable
+
+    $destDir = Split-Path -Parent $Dest
+    if (-not [string]::IsNullOrWhiteSpace($destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -MaximumRedirection 10 -Headers @{ "User-Agent" = $DownloadUserAgent }
+        return
+    } catch {
+        $webError = $_
+        Write-Warn "Invoke-WebRequest download failed: $($webError.Exception.Message)"
+    }
+
+    if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+        Write-Info "Retrying download with BITS ..."
+        try {
+            Start-BitsTransfer -Source $Url -Destination $Dest -DisplayName "Game Sync Installer" -Description "Downloading $BinaryName"
+            return
+        } catch {
+            throw "Download failed with both Invoke-WebRequest and BITS. Last error: $($_.Exception.Message)"
+        }
+    }
+
+    throw "Download failed and BITS is not available on this system."
 }
 
 # -- Create Start Menu shortcut -----------------------------------------------
