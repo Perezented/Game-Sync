@@ -96,6 +96,12 @@ The script will:
 Run the installer script with the `--uninstall` flag:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.sh | bash -s -- --uninstall
+```
+
+or (if you have the script downloaded and in the same directory):
+
+```bash
 bash install.sh --uninstall
 ```
 
@@ -122,6 +128,12 @@ rm -f ~/game_sync_settings.json
 | ![Windows App](/images/windows_app_pull_complete_from_steam_deck.png) |
 
 Run the installer script with the `-Uninstall` flag:
+
+```powershell
+irm https://raw.githubusercontent.com/Perezented/Game-Sync/testing/install.ps1 -OutFile .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
+```
+or (if you have the script installed and in the same directory):
 
 ```powershell
 .\install.ps1 -Uninstall
