@@ -18,6 +18,7 @@ $Repo        = "Perezented/Game-Sync"
 $BinaryName  = "game-sync.exe"
 $GithubApi   = "https://api.github.com/repos/$Repo/releases/latest"
 $DownloadUrl = "https://github.com/$Repo/releases/latest/download/$BinaryName"
+$DownloadUserAgent = "Game-Sync-Installer"
 $DefaultDir  = Join-Path $env:LOCALAPPDATA "GameSync"
 $ShortcutDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
 
@@ -77,20 +78,45 @@ function Test-KnownVersion {
     return (Normalize-VersionValue $Version).ToLowerInvariant() -ne "unknown"
 }
 
+function Enable-Tls12IfAvailable {
+    $tls12 = [Net.SecurityProtocolType]::Tls12
+    if (([Net.ServicePointManager]::SecurityProtocol -band $tls12) -eq 0) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor $tls12
+    }
+}
+
 # -- Download with progress ---------------------------------------------------
 function Download-File {
     param([string]$Url, [string]$Dest)
+
     Write-Info "Downloading: $Url"
-    $wc = New-Object System.Net.WebClient
-    # Show progress via event
-    $wc.DownloadProgressChanged += {
-        $pct = $_.ProgressPercentage
-        Write-Progress -Activity "Downloading $BinaryName" -PercentComplete $pct -Status "$pct%"
+
+    Enable-Tls12IfAvailable
+
+    $destDir = Split-Path -Parent $Dest
+    if (-not [string]::IsNullOrWhiteSpace($destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     }
-    $task = $wc.DownloadFileTaskAsync($Url, $Dest)
-    while (-not $task.IsCompleted) { Start-Sleep -Milliseconds 200 }
-    Write-Progress -Activity "Downloading $BinaryName" -Completed
-    if ($task.IsFaulted) { throw $task.Exception.InnerException }
+
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -MaximumRedirection 10 -Headers @{ "User-Agent" = $DownloadUserAgent }
+        return
+    } catch {
+        $webError = $_
+        Write-Warn "Invoke-WebRequest download failed: $($webError.Exception.Message)"
+    }
+
+    if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+        Write-Info "Retrying download with BITS ..."
+        try {
+            Start-BitsTransfer -Source $Url -Destination $Dest -DisplayName "Game Sync Installer" -Description "Downloading $BinaryName"
+            return
+        } catch {
+            throw "Download failed with both Invoke-WebRequest and BITS. Last error: $($_.Exception.Message)"
+        }
+    }
+
+    throw "Download failed and BITS is not available on this system. Invoke-WebRequest error: $($webError.Exception.Message)"
 }
 
 # -- Create Start Menu shortcut -----------------------------------------------
@@ -137,13 +163,15 @@ function Install-Rclone {
 
     Write-Info "Downloading rclone ..."
     $zipUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
-    $tmpZip = Join-Path $env:TEMP "rclone-installer.zip"
-    $tmpDir = Join-Path $env:TEMP "rclone-tmp"
+    $tmpRoot = Join-Path $env:TEMP ("rclone-tmp-" + [guid]::NewGuid().ToString("N"))
+    $tmpZip = Join-Path $tmpRoot "rclone-installer.zip"
+    $tmpDir = Join-Path $tmpRoot "extract"
 
     try {
-        Invoke-WebRequest -Uri $zipUrl -OutFile $tmpZip -UseBasicParsing
-        if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
+        Download-File -Url $zipUrl -Dest $tmpZip
+        Write-Info "Extracting rclone archive ..."
         Expand-Archive -Path $tmpZip -DestinationPath $tmpDir
+        Write-Info "Installing rclone ..."
         $rcloneExe = Get-ChildItem -Path $tmpDir -Recurse -Filter "rclone.exe" | Select-Object -First 1
         if ($null -eq $rcloneExe) { throw "rclone.exe not found in archive." }
         Copy-Item $rcloneExe.FullName -Destination $rcloneDest -Force
@@ -151,8 +179,7 @@ function Install-Rclone {
         Write-Warn "rclone is in $InstallDir - make sure that folder is on your system PATH."
         Write-Info "To add it: System Settings → 'Edit environment variables' → Path → Add $InstallDir"
     } finally {
-        Remove-Item $tmpZip  -ErrorAction SilentlyContinue
-        Remove-Item $tmpDir  -Recurse -ErrorAction SilentlyContinue
+        Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -188,10 +215,201 @@ function Add-ToUserPath {
     }
 }
 
+function Remove-PathSafely {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [switch]$Recurse
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        return $true
+    }
+
+    try {
+        $removeParams = @{
+            LiteralPath = $Path
+            Force = $true
+            ErrorAction = 'Stop'
+        }
+        if ($Recurse) {
+            $removeParams.Recurse = $true
+        }
+
+        Remove-Item @removeParams
+        return $true
+    } catch {
+        Write-Warn "Could not remove ${Label}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Add-UniqueValue {
+    param(
+        [System.Collections.ArrayList]$List,
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+
+    if (-not $List.Contains($Value)) {
+        [void]$List.Add($Value)
+    }
+}
+
+function Test-IsAdmin {
+    return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
+function Get-ActiveFirewallProfiles {
+    $profiles = New-Object System.Collections.ArrayList
+
+    try {
+        $connectionProfiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
+        foreach ($connectionProfile in @($connectionProfiles)) {
+            switch ($connectionProfile.NetworkCategory) {
+                'DomainAuthenticated' { Add-UniqueValue -List $profiles -Value 'Domain' }
+                'Private'             { Add-UniqueValue -List $profiles -Value 'Private' }
+                'Public'              { Add-UniqueValue -List $profiles -Value 'Public' }
+            }
+        }
+    } catch {
+    }
+
+    if ($profiles.Count -eq 0) {
+        try {
+            $enabledProfiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' }
+            foreach ($firewallProfile in @($enabledProfiles)) {
+                Add-UniqueValue -List $profiles -Value $firewallProfile.Name
+            }
+        } catch {
+        }
+    }
+
+    return @($profiles)
+}
+
+function Test-FirewallRuleAppliesToActiveProfile {
+    param(
+        $Rule,
+        [string[]]$ActiveProfiles
+    )
+
+    if ($null -eq $Rule) {
+        return $false
+    }
+
+    if (($Rule.Profile -eq 'Any') -or ($Rule.Profile -eq 0)) {
+        return $true
+    }
+
+    $ruleProfiles = @($Rule.Profile.ToString().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (@($ruleProfiles).Count -eq 0) {
+        return $true
+    }
+
+    foreach ($activeProfile in @($ActiveProfiles)) {
+        if ($ruleProfiles -contains $activeProfile) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-OpenSshFirewallRule {
+    param(
+        $Rule,
+        [string[]]$ActiveProfiles
+    )
+
+    if ($null -eq $Rule) {
+        return $false
+    }
+
+    if (-not (Test-FirewallRuleAppliesToActiveProfile -Rule $Rule -ActiveProfiles $ActiveProfiles)) {
+        return $false
+    }
+
+    $applicationFilter = $Rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+    $serviceFilter = $Rule | Get-NetFirewallServiceFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    $program = $null
+    if ($null -ne $applicationFilter) {
+        $program = $applicationFilter.Program
+    }
+
+    $serviceName = $null
+    if ($null -ne $serviceFilter) {
+        $serviceName = $serviceFilter.Service
+    }
+
+    $programIsUnrestricted = [string]::IsNullOrWhiteSpace($program) -or $program -eq 'Any'
+    $serviceIsUnrestricted = [string]::IsNullOrWhiteSpace($serviceName) -or $serviceName -eq 'Any'
+    $matchesSshdProgram = (-not [string]::IsNullOrWhiteSpace($program)) -and ($program -match '(?i)(^|[\\/])sshd\.exe$')
+    $matchesSshdService = (-not [string]::IsNullOrWhiteSpace($serviceName)) -and ($serviceName -ieq 'sshd')
+
+    return ($programIsUnrestricted -or $matchesSshdProgram) -and ($serviceIsUnrestricted -or $matchesSshdService)
+}
+
+function Get-SshServerStatus {
+    $capability = $null
+    $service = Get-Service sshd -ErrorAction SilentlyContinue
+    $activeProfiles = Get-ActiveFirewallProfiles
+    $capabilityQueryFailed = $false
+    $firewallQueryFailed = $false
+    $port22Rules = @()
+
+    try {
+        $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction Stop | Select-Object -First 1
+    } catch {
+        $capabilityQueryFailed = $true
+    }
+
+    try {
+        $port22Rules = Get-NetFirewallPortFilter -Protocol TCP -ErrorAction Stop |
+            Where-Object { $_.LocalPort -eq 22 } |
+            ForEach-Object {
+                Get-NetFirewallRule -AssociatedNetFirewallPortFilter $_ -ErrorAction SilentlyContinue
+            } |
+            Where-Object {
+                $_.Direction -eq 'Inbound' -and
+                $_.Action -eq 'Allow' -and
+                $_.Enabled -eq 'True' -and
+                (Test-OpenSshFirewallRule -Rule $_ -ActiveProfiles $activeProfiles)
+            }
+    } catch {
+        $firewallQueryFailed = $true
+    }
+
+    $isInstalled = ($null -ne $capability) -and ($capability.State -eq "Installed")
+    $isRunning = ($null -ne $service) -and ($service.Status -eq "Running")
+    $isAutomatic = ($null -ne $service) -and ($service.StartType -eq "Automatic")
+    $firewallAllows22 = @($port22Rules).Count -gt 0
+
+    return [pscustomobject]@{
+        Installed        = $isInstalled
+        Running          = $isRunning
+        Automatic        = $isAutomatic
+        FirewallAllows22 = $firewallAllows22
+        CapabilityQueryFailed = $capabilityQueryFailed
+        FirewallQueryFailed = $firewallQueryFailed
+        Ready            = $isInstalled -and $isRunning -and $isAutomatic -and $firewallAllows22
+    }
+}
+
+function Get-OpenSshFirewallRule {
+    return Get-NetFirewallRule -Name "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
 # -- Enable OpenSSH Server ----------------------------------------------------
 function Enable-SshServer {
     Write-Info "Checking SSH Server ..."
-    $feature = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue
+    $feature = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -eq $feature) {
         Write-Warn "Could not query OpenSSH Server capability. Enable manually via Settings → Optional Features."
         return
@@ -209,21 +427,35 @@ function Enable-SshServer {
         return
     }
     if ($svc.Status -ne "Running") {
-        Start-Service sshd
-        Write-Ok "sshd service started."
+        try {
+            Start-Service sshd -ErrorAction Stop
+            Write-Ok "sshd service started."
+        } catch {
+            Write-Warn "Could not start sshd automatically: $($_.Exception.Message)"
+            Write-Warn "OpenSSH Server may need manual configuration. Try running 'Start-Service sshd' in an elevated PowerShell after checking the OpenSSH logs and sshd_config."
+        }
     } else {
         Write-Ok "sshd service is already running."
     }
-    Set-Service -Name sshd -StartupType Automatic
-    Write-Ok "sshd set to start automatically."
+
+    try {
+        Set-Service -Name sshd -StartupType Automatic -ErrorAction Stop
+        Write-Ok "sshd set to start automatically."
+    } catch {
+        Write-Warn "Could not set sshd to start automatically: $($_.Exception.Message)"
+    }
 
     # Firewall rule
-    $rule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+    $rule = Get-NetFirewallRule -Name "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue
     if ($null -eq $rule) {
-        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
-            -DisplayName "OpenSSH Server (port 22)" `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-        Write-Ok "Firewall rule created for port 22."
+        try {
+            New-NetFirewallRule -Name "OpenSSH Server (sshd)" `
+                -DisplayName "OpenSSH Server (port 22)" `
+                -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+            Write-Ok "Firewall rule created for port 22."
+        } catch {
+            Write-Warn "Could not create the firewall rule for port 22: $($_.Exception.Message)"
+        }
     } else {
         Write-Ok "Firewall rule for port 22 already exists."
     }
@@ -376,12 +608,55 @@ function Post-Install {
     Write-Info "To sync TO this Windows machine, OpenSSH Server must be enabled."
     Write-Warn "This requires administrator privileges."
 
-    $enableSsh = Prompt-YesNo "Enable OpenSSH Server so other machines can sync to this PC?" $false
+    $sshStatus = Get-SshServerStatus
+    $isAdmin = Test-IsAdmin
+
+    if ($sshStatus.CapabilityQueryFailed -or $sshStatus.FirewallQueryFailed) {
+        if (-not $isAdmin) {
+            Write-Warn "Could not fully check OpenSSH Server status without administrator rights. The installer can still relaunch as admin if you choose to enable SSH."
+        } else {
+            Write-Warn "Could not fully check OpenSSH Server status automatically."
+        }
+    }
+
+    if ($sshStatus.Ready) {
+        Write-Ok "OpenSSH Server is already installed, running, set to start automatically, and allowed through the firewall on TCP 22."
+    } else {
+        if ($sshStatus.CapabilityQueryFailed) {
+            Write-Info "OpenSSH Server install status could not be verified."
+        } elseif ($sshStatus.Installed) {
+            Write-Info "OpenSSH Server is installed."
+        } else {
+            Write-Info "OpenSSH Server is not installed."
+        }
+
+        if ($sshStatus.Running) {
+            Write-Info "sshd service is running."
+        } else {
+            Write-Info "sshd service is not running."
+        }
+
+        if ($sshStatus.Automatic) {
+            Write-Info "sshd is set to start automatically."
+        } else {
+            Write-Info "sshd is not set to start automatically."
+        }
+
+        if ($sshStatus.FirewallQueryFailed) {
+            Write-Info "Firewall status for inbound TCP 22 could not be verified."
+        } elseif ($sshStatus.FirewallAllows22) {
+            Write-Info "Firewall already allows inbound TCP 22."
+        } else {
+            Write-Info "Firewall does not currently allow inbound TCP 22."
+        }
+    }
+
+    $enableSsh = $false
+    if (-not $sshStatus.Ready) {
+        $enableSsh = Prompt-YesNo "Enable or finish configuring OpenSSH Server so other machines can sync to this PC?" $false
+    }
     if ($enableSsh) {
         # Re-launch as admin if not already elevated
-        $isAdmin = ([Security.Principal.WindowsPrincipal] `
-            [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin) {
             if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
                 Write-Warn "SSH setup requires administrator rights, but this installer was not started from a script file."
@@ -451,9 +726,17 @@ function Uninstall-GameSync {
         (Join-Path $env:PROGRAMFILES "GameSync\game-sync.exe"),
         (Join-Path ([Environment]::GetFolderPath("Desktop")) "game-sync.exe")
     )
+    $installDirCandidates = New-Object System.Collections.ArrayList
+    Add-UniqueValue -List $installDirCandidates -Value (Join-Path $env:LOCALAPPDATA "GameSync")
+    Add-UniqueValue -List $installDirCandidates -Value (Join-Path $env:PROGRAMFILES "GameSync")
     $foundPath = $null
+    $custom = ""
     foreach ($c in $candidates) {
         if (Test-Path $c) { $foundPath = $c; break }
+    }
+
+    if ($foundPath) {
+        Add-UniqueValue -List $installDirCandidates -Value (Split-Path $foundPath)
     }
 
     if (-not $foundPath) {
@@ -464,6 +747,7 @@ function Uninstall-GameSync {
             # Reject directories
             if ((Test-Path $custom) -and (Get-Item $custom -ErrorAction SilentlyContinue).PSIsContainer) {
                 Write-Warn "'$custom' is a directory, not a file. Skipping binary removal."
+                Add-UniqueValue -List $installDirCandidates -Value $custom
                 $custom = ""
             # Warn on filename mismatch
             } elseif ([System.IO.Path]::GetFileName($custom) -ne "game-sync.exe") {
@@ -477,11 +761,17 @@ function Uninstall-GameSync {
                     $custom = ""
                 } elseif (-not (Test-Path $custom)) {
                     Write-Warn "File not found: $custom"
+                    Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                     $custom = ""
+                } else {
+                    Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                 }
             } elseif (-not (Test-Path $custom)) {
                 Write-Warn "File not found: $custom"
+                Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                 $custom = ""
+            } else {
+                Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
             }
         }
         if ($custom -ne "") { $foundPath = $custom }
@@ -502,25 +792,11 @@ function Uninstall-GameSync {
         Ask "Confirm removal?"
         $removeBin = (Read-Host "  Type 'yes' to delete, or press Enter to skip").Trim().ToLower()
         if ($removeBin -eq "yes") {
-            Remove-Item $foundPath -Force -ErrorAction SilentlyContinue
-            Remove-Item "$foundPath.bak" -Force -ErrorAction SilentlyContinue
-            Remove-Item $versionFile -Force -ErrorAction SilentlyContinue
-            Write-Ok "Removed: $foundPath"
-
-            # Ask about rclone.exe in same folder
-            $rcloneInDir = Join-Path (Split-Path $foundPath) "rclone.exe"
-            if (Test-Path $rcloneInDir) {
-                Write-Host ""
-                Write-Info "The following file will be deleted:"
-                Write-Host "    $rcloneInDir" -ForegroundColor White
-                Ask "Also remove rclone.exe from the install folder?"
-                $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-                if ($removeRclone -eq "yes") {
-                    Remove-Item $rcloneInDir -Force
-                    Write-Ok "Removed: $rcloneInDir"
-                } else {
-                    Write-Info "rclone.exe kept."
-                }
+            $removedBinary = Remove-PathSafely -Path $foundPath -Label $foundPath
+            Remove-PathSafely -Path "$foundPath.bak" -Label "$foundPath.bak" | Out-Null
+            Remove-PathSafely -Path $versionFile -Label $versionFile | Out-Null
+            if ($removedBinary) {
+                Write-Ok "Removed: $foundPath"
             }
 
             # Optionally remove now-empty install directory
@@ -540,8 +816,9 @@ function Uninstall-GameSync {
                 Ask "Delete this empty directory?"
                 $rmDir = (Read-Host "  Type 'yes' to delete the directory, or press Enter to keep it").Trim().ToLower()
                 if ($rmDir -eq "yes") {
-                    Remove-Item $dir -Force
-                    Write-Ok "Removed empty directory: $dir"
+                    if (Remove-PathSafely -Path $dir -Label $dir) {
+                        Write-Ok "Removed empty directory: $dir"
+                    }
                 } else {
                     Write-Info "Directory kept: $dir"
                 }
@@ -553,6 +830,33 @@ function Uninstall-GameSync {
         Write-Warn "No binary found - skipping binary removal."
     }
 
+    # -- Remove rclone.exe ----------------------------------------------------
+    $rcloneCandidates = @(
+        $installDirCandidates |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { Join-Path $_ "rclone.exe" } |
+            Select-Object -Unique
+    )
+
+    foreach ($rcloneInDir in $rcloneCandidates) {
+        if (-not (Test-Path $rcloneInDir)) {
+            continue
+        }
+
+        Write-Host ""
+        Write-Info "The following file will be deleted:"
+        Write-Host "    $rcloneInDir" -ForegroundColor White
+        Ask "Also remove rclone.exe from the install folder?"
+        $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+        if ($removeRclone -eq "yes") {
+            if (Remove-PathSafely -Path $rcloneInDir -Label $rcloneInDir) {
+                Write-Ok "Removed: $rcloneInDir"
+            }
+        } else {
+            Write-Info "rclone.exe kept."
+        }
+    }
+
     # -- Remove Start Menu shortcut --------------------------------------------
     $startMenuLnk = Join-Path $ShortcutDir "Game Sync.lnk"
     if (Test-Path $startMenuLnk) {
@@ -561,7 +865,9 @@ function Uninstall-GameSync {
         Write-Host "    $startMenuLnk" -ForegroundColor White
         Ask "Remove Start Menu shortcut?"
         $removeStart = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeStart -eq "yes") { Remove-Item $startMenuLnk -Force; Write-Ok "Removed: $startMenuLnk" }
+        if ($removeStart -eq "yes") {
+            if (Remove-PathSafely -Path $startMenuLnk -Label $startMenuLnk) { Write-Ok "Removed: $startMenuLnk" }
+        }
         else { Write-Info "Start Menu shortcut kept." }
     } else { Write-Info "No Start Menu shortcut found." }
 
@@ -573,9 +879,62 @@ function Uninstall-GameSync {
         Write-Host "    $desktopLnk" -ForegroundColor White
         Ask "Remove Desktop shortcut?"
         $removeDesk = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeDesk -eq "yes") { Remove-Item $desktopLnk -Force; Write-Ok "Removed: $desktopLnk" }
+        if ($removeDesk -eq "yes") {
+            if (Remove-PathSafely -Path $desktopLnk -Label $desktopLnk) { Write-Ok "Removed: $desktopLnk" }
+        }
         else { Write-Info "Desktop shortcut kept." }
     } else { Write-Info "No Desktop shortcut found." }
+
+    # -- Remove SSH firewall / service settings --------------------------------
+    $sshFirewallRule = Get-OpenSshFirewallRule
+    if ($null -ne $sshFirewallRule) {
+        Write-Host ""
+        Write-Info "Found the OpenSSH inbound firewall rule for TCP 22:"
+        Write-Host "    $($sshFirewallRule.DisplayName) [$($sshFirewallRule.Name)]" -ForegroundColor White
+        $removeFirewallRule = Prompt-YesNo "Remove the OpenSSH firewall rule for inbound TCP 22?" $false
+        if ($removeFirewallRule) {
+            if (-not (Test-IsAdmin)) {
+                Write-Warn "Removing firewall rules requires administrator rights. Re-run the uninstaller as Administrator if you want to remove it."
+            } else {
+                try {
+                    Remove-NetFirewallRule -Name $sshFirewallRule.Name -ErrorAction Stop | Out-Null
+                    Write-Ok "Removed firewall rule: $($sshFirewallRule.DisplayName)"
+                } catch {
+                    Write-Warn "Could not remove firewall rule '$($sshFirewallRule.Name)': $($_.Exception.Message)"
+                }
+            }
+        } else {
+            Write-Info "Firewall rule kept."
+        }
+    }
+
+    $sshService = Get-Service sshd -ErrorAction SilentlyContinue
+    if ($null -ne $sshService) {
+        Write-Host ""
+        Write-Info "OpenSSH Server service settings:"
+        Write-Host "    Service: sshd" -ForegroundColor White
+        Write-Host "    Status: $($sshService.Status)" -ForegroundColor White
+        Write-Host "    Startup: $($sshService.StartType)" -ForegroundColor White
+        $removeSshSettings = Prompt-YesNo "Disable the sshd service and stop it if it is running?" $false
+        if ($removeSshSettings) {
+            if (-not (Test-IsAdmin)) {
+                Write-Warn "Changing sshd service settings requires administrator rights. Re-run the uninstaller as Administrator if you want to disable it."
+            } else {
+                try {
+                    if ($sshService.Status -eq 'Running') {
+                        Stop-Service sshd -Force -ErrorAction Stop
+                        Write-Ok "sshd service stopped."
+                    }
+                    Set-Service -Name sshd -StartupType Disabled -ErrorAction Stop
+                    Write-Ok "sshd service disabled."
+                } catch {
+                    Write-Warn "Could not update sshd service settings: $($_.Exception.Message)"
+                }
+            }
+        } else {
+            Write-Info "sshd service settings left unchanged."
+        }
+    }
 
     # -- Remove settings file --------------------------------------------------
     $settings = Join-Path $env:APPDATA "game_sync_settings.json"
@@ -585,7 +944,9 @@ function Uninstall-GameSync {
         Write-Host "    $settings" -ForegroundColor White
         Ask "Remove saved settings? (default: keep)"
         $removeSettings = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeSettings -eq "yes") { Remove-Item $settings -Force; Write-Ok "Removed: $settings" }
+        if ($removeSettings -eq "yes") {
+            if (Remove-PathSafely -Path $settings -Label $settings) { Write-Ok "Removed: $settings" }
+        }
         else { Write-Info "Settings kept at $settings" }
     }
 
