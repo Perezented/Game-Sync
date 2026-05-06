@@ -244,6 +244,21 @@ function Remove-PathSafely {
     }
 }
 
+function Add-UniqueValue {
+    param(
+        [System.Collections.ArrayList]$List,
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+
+    if (-not $List.Contains($Value)) {
+        [void]$List.Add($Value)
+    }
+}
+
 function Get-SshServerStatus {
     $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
     $service = Get-Service sshd -ErrorAction SilentlyContinue
@@ -563,9 +578,17 @@ function Uninstall-GameSync {
         (Join-Path $env:PROGRAMFILES "GameSync\game-sync.exe"),
         (Join-Path ([Environment]::GetFolderPath("Desktop")) "game-sync.exe")
     )
+    $installDirCandidates = New-Object System.Collections.ArrayList
+    Add-UniqueValue -List $installDirCandidates -Value (Join-Path $env:LOCALAPPDATA "GameSync")
+    Add-UniqueValue -List $installDirCandidates -Value (Join-Path $env:PROGRAMFILES "GameSync")
     $foundPath = $null
+    $custom = ""
     foreach ($c in $candidates) {
         if (Test-Path $c) { $foundPath = $c; break }
+    }
+
+    if ($foundPath) {
+        Add-UniqueValue -List $installDirCandidates -Value (Split-Path $foundPath)
     }
 
     if (-not $foundPath) {
@@ -576,6 +599,7 @@ function Uninstall-GameSync {
             # Reject directories
             if ((Test-Path $custom) -and (Get-Item $custom -ErrorAction SilentlyContinue).PSIsContainer) {
                 Write-Warn "'$custom' is a directory, not a file. Skipping binary removal."
+                Add-UniqueValue -List $installDirCandidates -Value $custom
                 $custom = ""
             # Warn on filename mismatch
             } elseif ([System.IO.Path]::GetFileName($custom) -ne "game-sync.exe") {
@@ -589,11 +613,17 @@ function Uninstall-GameSync {
                     $custom = ""
                 } elseif (-not (Test-Path $custom)) {
                     Write-Warn "File not found: $custom"
+                    Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                     $custom = ""
+                } else {
+                    Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                 }
             } elseif (-not (Test-Path $custom)) {
                 Write-Warn "File not found: $custom"
+                Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
                 $custom = ""
+            } else {
+                Add-UniqueValue -List $installDirCandidates -Value (Split-Path $custom)
             }
         }
         if ($custom -ne "") { $foundPath = $custom }
@@ -619,23 +649,6 @@ function Uninstall-GameSync {
             Remove-PathSafely -Path $versionFile -Label $versionFile | Out-Null
             if ($removedBinary) {
                 Write-Ok "Removed: $foundPath"
-            }
-
-            # Ask about rclone.exe in same folder
-            $rcloneInDir = Join-Path (Split-Path $foundPath) "rclone.exe"
-            if (Test-Path $rcloneInDir) {
-                Write-Host ""
-                Write-Info "The following file will be deleted:"
-                Write-Host "    $rcloneInDir" -ForegroundColor White
-                Ask "Also remove rclone.exe from the install folder?"
-                $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-                if ($removeRclone -eq "yes") {
-                    if (Remove-PathSafely -Path $rcloneInDir -Label $rcloneInDir) {
-                        Write-Ok "Removed: $rcloneInDir"
-                    }
-                } else {
-                    Write-Info "rclone.exe kept."
-                }
             }
 
             # Optionally remove now-empty install directory
@@ -667,6 +680,31 @@ function Uninstall-GameSync {
         }
     } else {
         Write-Warn "No binary found - skipping binary removal."
+    }
+
+    # -- Remove rclone.exe ----------------------------------------------------
+    $rcloneCandidates = $installDirCandidates |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { Join-Path $_ "rclone.exe" } |
+        Select-Object -Unique
+
+    foreach ($rcloneInDir in $rcloneCandidates) {
+        if (-not (Test-Path $rcloneInDir)) {
+            continue
+        }
+
+        Write-Host ""
+        Write-Info "The following file will be deleted:"
+        Write-Host "    $rcloneInDir" -ForegroundColor White
+        Ask "Also remove rclone.exe from the install folder?"
+        $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
+        if ($removeRclone -eq "yes") {
+            if (Remove-PathSafely -Path $rcloneInDir -Label $rcloneInDir) {
+                Write-Ok "Removed: $rcloneInDir"
+            }
+        } else {
+            Write-Info "rclone.exe kept."
+        }
     }
 
     # -- Remove Start Menu shortcut --------------------------------------------
