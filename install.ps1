@@ -259,15 +259,112 @@ function Add-UniqueValue {
     }
 }
 
+function Get-ActiveFirewallProfiles {
+    $profiles = New-Object System.Collections.ArrayList
+
+    try {
+        $connectionProfiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
+        foreach ($connectionProfile in @($connectionProfiles)) {
+            switch ($connectionProfile.NetworkCategory) {
+                'DomainAuthenticated' { Add-UniqueValue -List $profiles -Value 'Domain' }
+                'Private'             { Add-UniqueValue -List $profiles -Value 'Private' }
+                'Public'              { Add-UniqueValue -List $profiles -Value 'Public' }
+            }
+        }
+    } catch {
+    }
+
+    if ($profiles.Count -eq 0) {
+        try {
+            $enabledProfiles = Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' }
+            foreach ($firewallProfile in @($enabledProfiles)) {
+                Add-UniqueValue -List $profiles -Value $firewallProfile.Name
+            }
+        } catch {
+        }
+    }
+
+    return @($profiles)
+}
+
+function Test-FirewallRuleAppliesToActiveProfile {
+    param(
+        $Rule,
+        [string[]]$ActiveProfiles
+    )
+
+    if ($null -eq $Rule) {
+        return $false
+    }
+
+    if (($Rule.Profile -eq 'Any') -or ($Rule.Profile -eq 0)) {
+        return $true
+    }
+
+    $ruleProfiles = @($Rule.Profile.ToString().Split(',') | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (@($ruleProfiles).Count -eq 0) {
+        return $true
+    }
+
+    foreach ($activeProfile in @($ActiveProfiles)) {
+        if ($ruleProfiles -contains $activeProfile) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-OpenSshFirewallRule {
+    param(
+        $Rule,
+        [string[]]$ActiveProfiles
+    )
+
+    if ($null -eq $Rule) {
+        return $false
+    }
+
+    if (-not (Test-FirewallRuleAppliesToActiveProfile -Rule $Rule -ActiveProfiles $ActiveProfiles)) {
+        return $false
+    }
+
+    $applicationFilter = $Rule | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+    $serviceFilter = $Rule | Get-NetFirewallServiceFilter -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    $program = $null
+    if ($null -ne $applicationFilter) {
+        $program = $applicationFilter.Program
+    }
+
+    $serviceName = $null
+    if ($null -ne $serviceFilter) {
+        $serviceName = $serviceFilter.Service
+    }
+
+    $programIsUnrestricted = [string]::IsNullOrWhiteSpace($program) -or $program -eq 'Any'
+    $serviceIsUnrestricted = [string]::IsNullOrWhiteSpace($serviceName) -or $serviceName -eq 'Any'
+    $matchesSshdProgram = (-not [string]::IsNullOrWhiteSpace($program)) -and ($program -match '(?i)(^|[\\/])sshd\.exe$')
+    $matchesSshdService = (-not [string]::IsNullOrWhiteSpace($serviceName)) -and ($serviceName -ieq 'sshd')
+
+    return ($programIsUnrestricted -or $matchesSshdProgram) -and ($serviceIsUnrestricted -or $matchesSshdService)
+}
+
 function Get-SshServerStatus {
     $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
     $service = Get-Service sshd -ErrorAction SilentlyContinue
+    $activeProfiles = Get-ActiveFirewallProfiles
     $port22Rules = Get-NetFirewallPortFilter -Protocol TCP -ErrorAction SilentlyContinue |
         Where-Object { $_.LocalPort -eq 22 } |
         ForEach-Object {
             Get-NetFirewallRule -AssociatedNetFirewallPortFilter $_ -ErrorAction SilentlyContinue
         } |
-        Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Enabled -eq 'True' }
+        Where-Object {
+            $_.Direction -eq 'Inbound' -and
+            $_.Action -eq 'Allow' -and
+            $_.Enabled -eq 'True' -and
+            (Test-OpenSshFirewallRule -Rule $_ -ActiveProfiles $activeProfiles)
+        }
 
     $isInstalled = ($null -ne $capability) -and ($capability.State -eq "Installed")
     $isRunning = ($null -ne $service) -and ($service.Status -eq "Running")
