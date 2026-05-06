@@ -163,13 +163,15 @@ function Install-Rclone {
 
     Write-Info "Downloading rclone ..."
     $zipUrl = "https://downloads.rclone.org/rclone-current-windows-amd64.zip"
-    $tmpZip = Join-Path $env:TEMP "rclone-installer.zip"
-    $tmpDir = Join-Path $env:TEMP "rclone-tmp"
+    $tmpRoot = Join-Path $env:TEMP ("rclone-tmp-" + [guid]::NewGuid().ToString("N"))
+    $tmpZip = Join-Path $tmpRoot "rclone-installer.zip"
+    $tmpDir = Join-Path $tmpRoot "extract"
 
     try {
-        Invoke-WebRequest -Uri $zipUrl -OutFile $tmpZip -UseBasicParsing
-        if (Test-Path $tmpDir) { Remove-Item $tmpDir -Recurse -Force }
+        Download-File -Url $zipUrl -Dest $tmpZip
+        Write-Info "Extracting rclone archive ..."
         Expand-Archive -Path $tmpZip -DestinationPath $tmpDir
+        Write-Info "Installing rclone ..."
         $rcloneExe = Get-ChildItem -Path $tmpDir -Recurse -Filter "rclone.exe" | Select-Object -First 1
         if ($null -eq $rcloneExe) { throw "rclone.exe not found in archive." }
         Copy-Item $rcloneExe.FullName -Destination $rcloneDest -Force
@@ -177,8 +179,7 @@ function Install-Rclone {
         Write-Warn "rclone is in $InstallDir - make sure that folder is on your system PATH."
         Write-Info "To add it: System Settings → 'Edit environment variables' → Path → Add $InstallDir"
     } finally {
-        Remove-Item $tmpZip  -ErrorAction SilentlyContinue
-        Remove-Item $tmpDir  -Recurse -ErrorAction SilentlyContinue
+        Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
