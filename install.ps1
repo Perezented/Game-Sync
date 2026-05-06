@@ -222,13 +222,13 @@ function Remove-PathSafely {
         [switch]$Recurse
     )
 
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
         return $true
     }
 
     try {
         $removeParams = @{
-            Path = $Path
+            LiteralPath = $Path
             Force = $true
             ErrorAction = 'Stop'
         }
