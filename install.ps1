@@ -116,7 +116,7 @@ function Download-File {
         }
     }
 
-    throw "Download failed and BITS is not available on this system."
+    throw "Download failed and BITS is not available on this system. Invoke-WebRequest error: $($webError.Exception.Message)"
 }
 
 # -- Create Start Menu shortcut -----------------------------------------------
