@@ -215,6 +215,35 @@ function Add-ToUserPath {
     }
 }
 
+function Remove-PathSafely {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [switch]$Recurse
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path)) {
+        return $true
+    }
+
+    try {
+        $removeParams = @{
+            Path = $Path
+            Force = $true
+            ErrorAction = 'Stop'
+        }
+        if ($Recurse) {
+            $removeParams.Recurse = $true
+        }
+
+        Remove-Item @removeParams
+        return $true
+    } catch {
+        Write-Warn "Could not remove ${Label}: $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Get-SshServerStatus {
     $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
     $service = Get-Service sshd -ErrorAction SilentlyContinue
@@ -585,10 +614,12 @@ function Uninstall-GameSync {
         Ask "Confirm removal?"
         $removeBin = (Read-Host "  Type 'yes' to delete, or press Enter to skip").Trim().ToLower()
         if ($removeBin -eq "yes") {
-            Remove-Item $foundPath -Force -ErrorAction SilentlyContinue
-            Remove-Item "$foundPath.bak" -Force -ErrorAction SilentlyContinue
-            Remove-Item $versionFile -Force -ErrorAction SilentlyContinue
-            Write-Ok "Removed: $foundPath"
+            $removedBinary = Remove-PathSafely -Path $foundPath -Label $foundPath
+            Remove-PathSafely -Path "$foundPath.bak" -Label "$foundPath.bak" | Out-Null
+            Remove-PathSafely -Path $versionFile -Label $versionFile | Out-Null
+            if ($removedBinary) {
+                Write-Ok "Removed: $foundPath"
+            }
 
             # Ask about rclone.exe in same folder
             $rcloneInDir = Join-Path (Split-Path $foundPath) "rclone.exe"
@@ -599,8 +630,9 @@ function Uninstall-GameSync {
                 Ask "Also remove rclone.exe from the install folder?"
                 $removeRclone = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
                 if ($removeRclone -eq "yes") {
-                    Remove-Item $rcloneInDir -Force
-                    Write-Ok "Removed: $rcloneInDir"
+                    if (Remove-PathSafely -Path $rcloneInDir -Label $rcloneInDir) {
+                        Write-Ok "Removed: $rcloneInDir"
+                    }
                 } else {
                     Write-Info "rclone.exe kept."
                 }
@@ -623,8 +655,9 @@ function Uninstall-GameSync {
                 Ask "Delete this empty directory?"
                 $rmDir = (Read-Host "  Type 'yes' to delete the directory, or press Enter to keep it").Trim().ToLower()
                 if ($rmDir -eq "yes") {
-                    Remove-Item $dir -Force
-                    Write-Ok "Removed empty directory: $dir"
+                    if (Remove-PathSafely -Path $dir -Label $dir) {
+                        Write-Ok "Removed empty directory: $dir"
+                    }
                 } else {
                     Write-Info "Directory kept: $dir"
                 }
@@ -644,7 +677,9 @@ function Uninstall-GameSync {
         Write-Host "    $startMenuLnk" -ForegroundColor White
         Ask "Remove Start Menu shortcut?"
         $removeStart = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeStart -eq "yes") { Remove-Item $startMenuLnk -Force; Write-Ok "Removed: $startMenuLnk" }
+        if ($removeStart -eq "yes") {
+            if (Remove-PathSafely -Path $startMenuLnk -Label $startMenuLnk) { Write-Ok "Removed: $startMenuLnk" }
+        }
         else { Write-Info "Start Menu shortcut kept." }
     } else { Write-Info "No Start Menu shortcut found." }
 
@@ -656,7 +691,9 @@ function Uninstall-GameSync {
         Write-Host "    $desktopLnk" -ForegroundColor White
         Ask "Remove Desktop shortcut?"
         $removeDesk = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeDesk -eq "yes") { Remove-Item $desktopLnk -Force; Write-Ok "Removed: $desktopLnk" }
+        if ($removeDesk -eq "yes") {
+            if (Remove-PathSafely -Path $desktopLnk -Label $desktopLnk) { Write-Ok "Removed: $desktopLnk" }
+        }
         else { Write-Info "Desktop shortcut kept." }
     } else { Write-Info "No Desktop shortcut found." }
 
@@ -668,7 +705,9 @@ function Uninstall-GameSync {
         Write-Host "    $settings" -ForegroundColor White
         Ask "Remove saved settings? (default: keep)"
         $removeSettings = (Read-Host "  Type 'yes' to delete, or press Enter to keep").Trim().ToLower()
-        if ($removeSettings -eq "yes") { Remove-Item $settings -Force; Write-Ok "Removed: $settings" }
+        if ($removeSettings -eq "yes") {
+            if (Remove-PathSafely -Path $settings -Label $settings) { Write-Ok "Removed: $settings" }
+        }
         else { Write-Info "Settings kept at $settings" }
     }
 
