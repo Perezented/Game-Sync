@@ -683,10 +683,20 @@ function Uninstall-GameSync {
     }
 
     # -- Remove rclone.exe ----------------------------------------------------
-    $rcloneCandidates = $installDirCandidates |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        ForEach-Object { Join-Path $_ "rclone.exe" } |
-        Select-Object -Unique
+    $rcloneCandidates = @()
+    if ($foundPath) {
+        $verifiedInstallDir = $null
+
+        if (Test-Path $foundPath -PathType Leaf) {
+            $verifiedInstallDir = Split-Path -Parent $foundPath
+        } elseif (Test-Path $foundPath -PathType Container) {
+            $verifiedInstallDir = $foundPath
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($verifiedInstallDir)) {
+            $rcloneCandidates = @(Join-Path $verifiedInstallDir "rclone.exe")
+        }
+    }
 
     foreach ($rcloneInDir in $rcloneCandidates) {
         if (-not (Test-Path $rcloneInDir)) {
