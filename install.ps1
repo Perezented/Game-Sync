@@ -402,6 +402,10 @@ function Get-SshServerStatus {
     }
 }
 
+function Get-OpenSshFirewallRule {
+    return Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+
 # -- Enable OpenSSH Server ----------------------------------------------------
 function Enable-SshServer {
     Write-Info "Checking SSH Server ..."
@@ -874,6 +878,57 @@ function Uninstall-GameSync {
         }
         else { Write-Info "Desktop shortcut kept." }
     } else { Write-Info "No Desktop shortcut found." }
+
+    # -- Remove SSH firewall / service settings --------------------------------
+    $sshFirewallRule = Get-OpenSshFirewallRule
+    if ($null -ne $sshFirewallRule) {
+        Write-Host ""
+        Write-Info "Found the OpenSSH inbound firewall rule for TCP 22:"
+        Write-Host "    $($sshFirewallRule.DisplayName) [$($sshFirewallRule.Name)]" -ForegroundColor White
+        $removeFirewallRule = Prompt-YesNo "Remove the OpenSSH firewall rule for inbound TCP 22?" $false
+        if ($removeFirewallRule) {
+            if (-not (Test-IsAdmin)) {
+                Write-Warn "Removing firewall rules requires administrator rights. Re-run the uninstaller as Administrator if you want to remove it."
+            } else {
+                try {
+                    Remove-NetFirewallRule -Name $sshFirewallRule.Name -ErrorAction Stop | Out-Null
+                    Write-Ok "Removed firewall rule: $($sshFirewallRule.DisplayName)"
+                } catch {
+                    Write-Warn "Could not remove firewall rule '$($sshFirewallRule.Name)': $($_.Exception.Message)"
+                }
+            }
+        } else {
+            Write-Info "Firewall rule kept."
+        }
+    }
+
+    $sshService = Get-Service sshd -ErrorAction SilentlyContinue
+    if ($null -ne $sshService) {
+        Write-Host ""
+        Write-Info "OpenSSH Server service settings:"
+        Write-Host "    Service: sshd" -ForegroundColor White
+        Write-Host "    Status: $($sshService.Status)" -ForegroundColor White
+        Write-Host "    Startup: $($sshService.StartType)" -ForegroundColor White
+        $removeSshSettings = Prompt-YesNo "Disable the sshd service and stop it if it is running?" $false
+        if ($removeSshSettings) {
+            if (-not (Test-IsAdmin)) {
+                Write-Warn "Changing sshd service settings requires administrator rights. Re-run the uninstaller as Administrator if you want to disable it."
+            } else {
+                try {
+                    if ($sshService.Status -eq 'Running') {
+                        Stop-Service sshd -Force -ErrorAction Stop
+                        Write-Ok "sshd service stopped."
+                    }
+                    Set-Service -Name sshd -StartupType Disabled -ErrorAction Stop
+                    Write-Ok "sshd service disabled."
+                } catch {
+                    Write-Warn "Could not update sshd service settings: $($_.Exception.Message)"
+                }
+            }
+        } else {
+            Write-Info "sshd service settings left unchanged."
+        }
+    }
 
     # -- Remove settings file --------------------------------------------------
     $settings = Join-Path $env:APPDATA "game_sync_settings.json"
