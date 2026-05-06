@@ -130,7 +130,7 @@ rm -f ~/game_sync_settings.json
 Run the installer script with the `-Uninstall` flag:
 
 ```powershell
-PS C:\WINDOWS\system32> & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Perezented/Game-Sync/main/install.ps1))) -Uninstall
 ```
 or (if you have the script installed and in the same directory):
 
