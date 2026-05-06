@@ -427,21 +427,35 @@ function Enable-SshServer {
         return
     }
     if ($svc.Status -ne "Running") {
-        Start-Service sshd
-        Write-Ok "sshd service started."
+        try {
+            Start-Service sshd -ErrorAction Stop
+            Write-Ok "sshd service started."
+        } catch {
+            Write-Warn "Could not start sshd automatically: $($_.Exception.Message)"
+            Write-Warn "OpenSSH Server may need manual configuration. Try running 'Start-Service sshd' in an elevated PowerShell after checking the OpenSSH logs and sshd_config."
+        }
     } else {
         Write-Ok "sshd service is already running."
     }
-    Set-Service -Name sshd -StartupType Automatic
-    Write-Ok "sshd set to start automatically."
+
+    try {
+        Set-Service -Name sshd -StartupType Automatic -ErrorAction Stop
+        Write-Ok "sshd set to start automatically."
+    } catch {
+        Write-Warn "Could not set sshd to start automatically: $($_.Exception.Message)"
+    }
 
     # Firewall rule
     $rule = Get-NetFirewallRule -Name "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue
     if ($null -eq $rule) {
-        New-NetFirewallRule -Name "OpenSSH Server (sshd)" `
-            -DisplayName "OpenSSH Server (port 22)" `
-            -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-        Write-Ok "Firewall rule created for port 22."
+        try {
+            New-NetFirewallRule -Name "OpenSSH Server (sshd)" `
+                -DisplayName "OpenSSH Server (port 22)" `
+                -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+            Write-Ok "Firewall rule created for port 22."
+        } catch {
+            Write-Warn "Could not create the firewall rule for port 22: $($_.Exception.Message)"
+        }
     } else {
         Write-Ok "Firewall rule for port 22 already exists."
     }
