@@ -403,7 +403,7 @@ function Get-SshServerStatus {
 }
 
 function Get-OpenSshFirewallRule {
-    return Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue | Select-Object -First 1
+    return Get-NetFirewallRule -Name "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 
 # -- Enable OpenSSH Server ----------------------------------------------------
@@ -436,9 +436,9 @@ function Enable-SshServer {
     Write-Ok "sshd set to start automatically."
 
     # Firewall rule
-    $rule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+    $rule = Get-NetFirewallRule -Name "OpenSSH Server (sshd)" -ErrorAction SilentlyContinue
     if ($null -eq $rule) {
-        New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
+        New-NetFirewallRule -Name "OpenSSH Server (sshd)" `
             -DisplayName "OpenSSH Server (port 22)" `
             -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
         Write-Ok "Firewall rule created for port 22."
