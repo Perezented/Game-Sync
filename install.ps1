@@ -259,6 +259,12 @@ function Add-UniqueValue {
     }
 }
 
+function Test-IsAdmin {
+    return ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+}
+
 function Get-ActiveFirewallProfiles {
     $profiles = New-Object System.Collections.ArrayList
 
@@ -351,20 +357,34 @@ function Test-OpenSshFirewallRule {
 }
 
 function Get-SshServerStatus {
-    $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $capability = $null
     $service = Get-Service sshd -ErrorAction SilentlyContinue
     $activeProfiles = Get-ActiveFirewallProfiles
-    $port22Rules = Get-NetFirewallPortFilter -Protocol TCP -ErrorAction SilentlyContinue |
-        Where-Object { $_.LocalPort -eq 22 } |
-        ForEach-Object {
-            Get-NetFirewallRule -AssociatedNetFirewallPortFilter $_ -ErrorAction SilentlyContinue
-        } |
-        Where-Object {
-            $_.Direction -eq 'Inbound' -and
-            $_.Action -eq 'Allow' -and
-            $_.Enabled -eq 'True' -and
-            (Test-OpenSshFirewallRule -Rule $_ -ActiveProfiles $activeProfiles)
-        }
+    $capabilityQueryFailed = $false
+    $firewallQueryFailed = $false
+    $port22Rules = @()
+
+    try {
+        $capability = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction Stop | Select-Object -First 1
+    } catch {
+        $capabilityQueryFailed = $true
+    }
+
+    try {
+        $port22Rules = Get-NetFirewallPortFilter -Protocol TCP -ErrorAction Stop |
+            Where-Object { $_.LocalPort -eq 22 } |
+            ForEach-Object {
+                Get-NetFirewallRule -AssociatedNetFirewallPortFilter $_ -ErrorAction SilentlyContinue
+            } |
+            Where-Object {
+                $_.Direction -eq 'Inbound' -and
+                $_.Action -eq 'Allow' -and
+                $_.Enabled -eq 'True' -and
+                (Test-OpenSshFirewallRule -Rule $_ -ActiveProfiles $activeProfiles)
+            }
+    } catch {
+        $firewallQueryFailed = $true
+    }
 
     $isInstalled = ($null -ne $capability) -and ($capability.State -eq "Installed")
     $isRunning = ($null -ne $service) -and ($service.Status -eq "Running")
@@ -376,6 +396,8 @@ function Get-SshServerStatus {
         Running          = $isRunning
         Automatic        = $isAutomatic
         FirewallAllows22 = $firewallAllows22
+        CapabilityQueryFailed = $capabilityQueryFailed
+        FirewallQueryFailed = $firewallQueryFailed
         Ready            = $isInstalled -and $isRunning -and $isAutomatic -and $firewallAllows22
     }
 }
@@ -569,10 +591,22 @@ function Post-Install {
     Write-Warn "This requires administrator privileges."
 
     $sshStatus = Get-SshServerStatus
+    $isAdmin = Test-IsAdmin
+
+    if ($sshStatus.CapabilityQueryFailed -or $sshStatus.FirewallQueryFailed) {
+        if (-not $isAdmin) {
+            Write-Warn "Could not fully check OpenSSH Server status without administrator rights. The installer can still relaunch as admin if you choose to enable SSH."
+        } else {
+            Write-Warn "Could not fully check OpenSSH Server status automatically."
+        }
+    }
+
     if ($sshStatus.Ready) {
         Write-Ok "OpenSSH Server is already installed, running, set to start automatically, and allowed through the firewall on TCP 22."
     } else {
-        if ($sshStatus.Installed) {
+        if ($sshStatus.CapabilityQueryFailed) {
+            Write-Info "OpenSSH Server install status could not be verified."
+        } elseif ($sshStatus.Installed) {
             Write-Info "OpenSSH Server is installed."
         } else {
             Write-Info "OpenSSH Server is not installed."
@@ -590,7 +624,9 @@ function Post-Install {
             Write-Info "sshd is not set to start automatically."
         }
 
-        if ($sshStatus.FirewallAllows22) {
+        if ($sshStatus.FirewallQueryFailed) {
+            Write-Info "Firewall status for inbound TCP 22 could not be verified."
+        } elseif ($sshStatus.FirewallAllows22) {
             Write-Info "Firewall already allows inbound TCP 22."
         } else {
             Write-Info "Firewall does not currently allow inbound TCP 22."
@@ -603,9 +639,6 @@ function Post-Install {
     }
     if ($enableSsh) {
         # Re-launch as admin if not already elevated
-        $isAdmin = ([Security.Principal.WindowsPrincipal] `
-            [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-                [Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin) {
             if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
                 Write-Warn "SSH setup requires administrator rights, but this installer was not started from a script file."
