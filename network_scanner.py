@@ -16,12 +16,11 @@ class NetworkScanner(QThread):
     scan_complete = pyqtSignal(list)  # list of (ip, os_type, label, mac)
     scan_status = pyqtSignal(str)  # progress messages
 
-    # Port -> OS hint, checked in priority order
-    OS_PORTS = [
-        (445, "Windows"),  # SMB
-        (3389, "Windows"),  # RDP
-        (22, "Linux"),  # SSH
-    ]
+    # Ports used as host liveness + OS hints.
+    PORT_SMB = 445
+    PORT_RDP = 3389
+    PORT_SSH = 22
+    PROBE_PORTS = [PORT_SMB, PORT_RDP, PORT_SSH]
 
     def run(self):
         self.scan_status.emit("Scanning network…")
@@ -55,22 +54,21 @@ class NetworkScanner(QThread):
             return None
 
     def _probe_host(self, ip):
-        os_type = "Unknown"
-        alive = False
+        open_ports = set()
 
-        for port, hint in self.OS_PORTS:
+        for port in self.PROBE_PORTS:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(0.4)
                     if s.connect_ex((ip, port)) == 0:
-                        alive = True
-                        os_type = hint
-                        break
+                        open_ports.add(port)
             except Exception:
                 pass
 
-        if not alive:
+        if not open_ports:
             return None
+
+        os_type = self._guess_os_type(ip, open_ports)
 
         try:
             hostname = socket.gethostbyaddr(ip)[0]
@@ -80,6 +78,31 @@ class NetworkScanner(QThread):
         mac = self._get_mac_for_ip(ip)
         label = f"{ip}  ({hostname})  [{os_type}]"
         return (ip, os_type, label, mac)
+
+    def _guess_os_type(self, ip, open_ports):
+        # Strong Windows indicators.
+        if self.PORT_SMB in open_ports or self.PORT_RDP in open_ports:
+            return "Windows"
+
+        if self.PORT_SSH in open_ports:
+            banner = self._get_ssh_banner(ip)
+            if "windows" in banner:
+                return "Windows"
+            if banner:
+                return "Linux"
+
+        return "Unknown"
+
+    def _get_ssh_banner(self, ip):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.8)
+                if s.connect_ex((ip, self.PORT_SSH)) != 0:
+                    return ""
+                data = s.recv(256)
+                return data.decode("utf-8", errors="ignore").strip().lower()
+        except Exception:
+            return ""
 
     def _get_mac_for_ip(self, ip):
         try:
